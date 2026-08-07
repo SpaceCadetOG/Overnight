@@ -1,0 +1,204 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/ogtrading/overnight-strategy/internal/auction"
+	"github.com/ogtrading/overnight-strategy/internal/backtest"
+	"github.com/ogtrading/overnight-strategy/internal/marketdata/cache"
+	"github.com/ogtrading/overnight-strategy/internal/models"
+	"github.com/ogtrading/overnight-strategy/internal/reporting"
+	"github.com/ogtrading/overnight-strategy/internal/research"
+	"github.com/ogtrading/overnight-strategy/internal/session"
+	"github.com/ogtrading/overnight-strategy/internal/strategy"
+)
+
+func main() {
+	input := flag.String(
+		"input",
+		"data/raw/HL_BTC_5m_20260720_20260727.csv",
+		"input candle CSV",
+	)
+
+	timezone := flag.String(
+		"timezone",
+		"America/Chicago",
+		"strategy timezone",
+	)
+
+	entryMethod := flag.String(
+		"entry",
+		string(strategy.EntryMidpoint),
+		"entry method: FIB_382, MIDPOINT_382_500, FIB_500",
+	)
+
+	stopMethod := flag.String(
+		"stop",
+		string(strategy.StopProfileFib),
+		"stop method: FIB_382, VALUE_AREA, PROFILE_FIB, FVG_CLOSE",
+	)
+
+	tp1Method := flag.String(
+		"tp1",
+		string(strategy.TP1Fib618),
+		"TP1 method: FIB_618, POC, NEAREST_VALID",
+	)
+
+	executionMode := flag.String(
+		"execution",
+		string(backtest.ExecutionIdeal),
+		"execution mode: ideal or realistic",
+	)
+
+	printAuctionStructures := flag.Bool(
+		"print-auction-structures",
+		false,
+		"print pre-entry auction structure for each session",
+	)
+
+	flag.Parse()
+
+	location, err := time.LoadLocation(*timezone)
+	if err != nil {
+		log.Fatalf("load timezone: %v", err)
+	}
+
+	executionConfig, err := backtest.ParseExecutionConfig(*executionMode)
+	if err != nil {
+		log.Fatalf("execution config: %v", err)
+	}
+
+	candles, err := cache.ReadCandlesCSV(*input)
+	if err != nil {
+		log.Fatalf("read candles: %v", err)
+	}
+
+	sessions, err := session.BuildOvernightSessions(candles, location)
+	if err != nil {
+		log.Fatalf("build sessions: %v", err)
+	}
+
+	config := strategy.DefaultPlanConfig()
+	config.EntryMethod = strategy.EntryMethod(*entryMethod)
+	config.StopMethod = strategy.StopMethod(*stopMethod)
+	config.TP1Method = strategy.TP1Method(*tp1Method)
+
+	results := make([]models.TradeResult, 0, len(sessions))
+	observations := make([]research.AuctionObservation, 0, len(sessions))
+
+	fmt.Printf("Backtesting %d complete sessions\n", len(sessions))
+	fmt.Printf(
+		"Entry=%s Stop=%s TP1=%s Execution=%s\n\n",
+		config.EntryMethod,
+		config.StopMethod,
+		config.TP1Method,
+		executionConfig.Mode,
+	)
+
+	for _, overnight := range sessions {
+		analyzed, err := strategy.AnalyzeSession(overnight)
+		if err != nil {
+			log.Fatalf(
+				"analyze %s: %v",
+				overnight.Date.Format("2006-01-02"),
+				err,
+			)
+		}
+
+		plan := strategy.BuildTradePlanWithConfig(
+			analyzed,
+			config,
+		)
+
+		result, err := backtest.SimulateTradeWithConfig(
+			plan,
+			candles,
+			location,
+			executionConfig,
+		)
+		if err != nil {
+			log.Fatalf(
+				"simulate %s: %v",
+				overnight.Date.Format("2006-01-02"),
+				err,
+			)
+		}
+
+		results = append(results, result)
+
+		observation := research.AuctionObservation{
+			Date:   overnight.Date,
+			Result: result,
+		}
+
+		structure, buildErr := auction.BuildAuctionStructure(
+			analyzed,
+			plan,
+		)
+		if buildErr != nil {
+			observation.BuildError = buildErr.Error()
+		} else {
+			observation.Structure = structure
+		}
+
+		observations = append(observations, observation)
+
+		fmt.Printf(
+			"%s | %-5s | %-10s | Entry %.2f | Fill %.2f | "+
+				"Exit %.2f | Gross %6.2fR | Fee %5.2fR | "+
+				"Net %6.2fR | MFE %5.2fR | MAE %5.2fR | "+
+				"Miss %.2f | Fill %3dm\n",
+			overnight.Date.Format("2006-01-02"),
+			result.Direction,
+			result.Outcome,
+			result.Entry,
+			result.FillPrice,
+			result.ExitPrice,
+			result.GrossR,
+			result.FeeR,
+			result.RealizedR,
+			result.MFER,
+			result.MAER,
+			result.MissedEntryDistance,
+			result.MinutesToFill,
+		)
+	}
+
+	stats := reporting.CalculateStatistics(results)
+
+	fmt.Println()
+	fmt.Printf("Valid plans:       %d\n", stats.ValidPlans)
+	fmt.Printf("Filled:            %d\n", stats.Filled)
+	fmt.Printf("No fill:           %d\n", stats.NoFill)
+	fmt.Printf("Fill rate:         %.1f%%\n", stats.FillRate*100)
+	fmt.Printf("Wins:              %d\n", stats.Wins)
+	fmt.Printf("Losses:            %d\n", stats.Losses)
+	fmt.Printf("Win rate:          %.1f%%\n", stats.WinRate*100)
+	fmt.Printf("TP2:               %d\n", stats.TP2Count)
+	fmt.Printf("TP1 + BE:          %d\n", stats.TP1BECount)
+	fmt.Printf("Stopped:           %d\n", stats.StoppedCount)
+	fmt.Printf("Time exits:        %d\n", stats.TimeExitCount)
+	fmt.Printf("Total R:           %.2f\n", stats.TotalR)
+	fmt.Printf("Average R/session: %.2f\n", stats.AverageR)
+	fmt.Printf("Average R/filled:  %.2f\n", stats.AverageRFilled)
+	fmt.Printf("Average MFE:       %.2fR\n", stats.AverageMFER)
+	fmt.Printf("Average MAE:       %.2fR\n", stats.AverageMAER)
+	fmt.Printf("Average miss:      %.2f points\n", stats.AverageMissDistance)
+	fmt.Printf("Average fill time: %.1f minutes\n", stats.AverageMinutesToFill)
+	fmt.Printf("Profit factor:     %.2f\n", stats.ProfitFactor)
+	fmt.Printf("Max drawdown:      %.2fR\n", stats.MaxDrawdownR)
+
+	fmt.Println()
+
+	researchReport := research.Analyze(results)
+	research.Print(researchReport)
+
+	if *printAuctionStructures {
+		for _, observation := range observations {
+			research.PrintAuctionObservation(observation)
+		}
+	}
+}

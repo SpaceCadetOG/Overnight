@@ -1,0 +1,61 @@
+# binaries
+bin/
+dist/
+
+# Go
+.gocache/
+coverage.out
+
+# env
+.env
+
+# logs
+logs/
+archive/
+reports/
+output/
+
+# sqlite
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+
+# mac
+.DS_Store
+
+# generated
+tmp/
+
+# local configs
+configs/local.yaml
+
+# docker
+*.pid
+# ============================================================
+# Large market/research data — local or SSD only
+# ============================================================
+
+data/raw/
+data/research/
+data/live/
+data/orderbook/
+data/recorder/
+data/snapshots/
+data/trade_windows/
+
+# Generated research artifacts
+work/
+go_context_chunks/
+
+# Large data formats
+*.csv
+*.jsonl
+*.parquet
+*.parquet.zst
+*.zst
+
+# Keep placeholders if needed
+!data/**/.gitkeep
