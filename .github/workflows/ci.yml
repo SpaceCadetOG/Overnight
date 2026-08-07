@@ -1,0 +1,151 @@
+name: Overnight Strategy CI
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.4'
+          cache: true
+
+      - name: Show Go version
+        run: go version
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify gofmt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UNFORMATTED="$(gofmt -l $(find . -type f -name '*.go' \
+            ! -path './vendor/*' \
+            ! -path './.git/*'))"
+
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following Go files are not formatted:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+          echo "gofmt PASS"
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+  build-pi:
+    name: Build Raspberry Pi ARM64
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+
+    env:
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: 0
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.4'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Create output directory
+        run: mkdir -p dist/linux-arm64
+
+      - name: Build dailylevels
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/linux-arm64/dailylevels \
+            ./cmd/dailylevels
+
+      - name: Build dailyplans
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/linux-arm64/dailyplans \
+            ./cmd/dailyplans
+
+      - name: Build Lighter collector
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/linux-arm64/lightercollector \
+            ./cmd/lightercollector
+
+      - name: Build Lighter executor
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/linux-arm64/lighterexecutor \
+            ./cmd/lighterexecutor
+
+      - name: Build research report
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/linux-arm64/researchreport \
+            ./cmd/researchreport
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist/linux-arm64
+          sha256sum \
+            dailylevels \
+            dailyplans \
+            lightercollector \
+            lighterexecutor \
+            researchreport \
+            > SHA256SUMS
+
+      - name: Show build
+        run: |
+          ls -lh dist/linux-arm64
+          cat dist/linux-arm64/SHA256SUMS
+
+      - name: Upload Raspberry Pi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: overnight-linux-arm64
+          path: dist/linux-arm64/
+          if-no-files-found: error
+          retention-days: 14
