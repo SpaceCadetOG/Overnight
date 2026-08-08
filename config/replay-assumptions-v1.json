@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "assumption_version": "lighter-replay-v1-20260810",
+  "venue": "LIGHTER",
+  "account_tier": "STANDARD",
+  "fees": {
+    "maker_bps": 0.0,
+    "taker_bps": 0.0,
+    "stress_premium_maker_bps": 0.4,
+    "stress_premium_taker_bps": 2.8,
+    "source": "Lighter account-types documentation; refresh from account metadata before each cycle"
+  },
+  "latency": {
+    "maker_submit_ms": 200,
+    "cancel_ms": 200,
+    "taker_ms": 300,
+    "local_network_latency": "measured_per_event",
+    "source": "Lighter Standard account published latency plus measured local timestamps"
+  },
+  "limit_fill": {
+    "touch_is_not_fill": true,
+    "requires_trade_through_or_queue_consumption": true,
+    "queue_position_model": "visible_size_ahead_at_ack",
+    "partial_fills": true,
+    "fallback_when_l2_unavailable": "mark_low_confidence_and_exclude_from_primary_research"
+  },
+  "spread": {
+    "source": "reconstructed_l2_at_decision_time",
+    "stale_after_ms": 2000
+  },
+  "slippage": {
+    "market_and_trigger_orders": "walk_observed_l2_depth",
+    "fallback": "half_spread_plus_one_tick",
+    "limit_orders": "zero_price_improvement_assumed_unless_observed"
+  },
+  "funding": {
+    "source": "observed_lighter_funding_events",
+    "apply_only_when_position_crosses_funding_timestamp": true
+  },
+  "clock": {
+    "canonical": "exchange_timestamp",
+    "receipt_timestamp_retained": true,
+    "skew_is_a_data_quality_feature": true
+  }
+}

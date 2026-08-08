@@ -85,66 +85,37 @@ jobs:
       - name: Create output directory
         run: mkdir -p dist/linux-arm64
 
-      - name: Build dailylevels
+      - name: Build production binaries
         run: |
-          go build \
-            -trimpath \
-            -ldflags="-s -w" \
-            -o dist/linux-arm64/dailylevels \
-            ./cmd/dailylevels
-
-      - name: Build dailyplans
-        run: |
-          go build \
-            -trimpath \
-            -ldflags="-s -w" \
-            -o dist/linux-arm64/dailyplans \
-            ./cmd/dailyplans
-
-      - name: Build Lighter collector
-        run: |
-          BUILT_AT="$(date -u +%FT%TZ)"
-          go build \
-            -trimpath \
-            -ldflags="-s -w -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Version=${GITHUB_REF_NAME} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Commit=${GITHUB_SHA} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.BuiltAt=${BUILT_AT}" \
-            -o dist/linux-arm64/lightercollector \
-            ./cmd/lightercollector
-
-      - name: Build archive and validation tools
-        run: |
+          set -euo pipefail
           BUILT_AT="$(date -u +%FT%TZ)"
           LDFLAGS="-s -w -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Version=${GITHUB_REF_NAME} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Commit=${GITHUB_SHA} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.BuiltAt=${BUILT_AT}"
-          go build -trimpath -ldflags="$LDFLAGS" -o dist/linux-arm64/collectorarchive ./cmd/collectorarchive
-          go build -trimpath -ldflags="$LDFLAGS" -o dist/linux-arm64/packagevalidator ./cmd/packagevalidator
-
-      - name: Build Lighter executor
-        run: |
-          go build \
-            -trimpath \
-            -ldflags="-s -w" \
-            -o dist/linux-arm64/lighterexecutor \
-            ./cmd/lighterexecutor
-
-      - name: Build research report
-        run: |
-          go build \
-            -trimpath \
-            -ldflags="-s -w" \
-            -o dist/linux-arm64/researchreport \
-            ./cmd/researchreport
+          for binary in \
+            lightercollector \
+            dailyplans \
+            eodexport \
+            tradedashboard \
+            collectorarchive \
+            packagevalidator \
+            lighterexecutor \
+            dailylevels \
+            researchreport
+          do
+            go build -trimpath -ldflags="$LDFLAGS" -o "dist/linux-arm64/$binary" "./cmd/$binary"
+          done
 
       - name: Generate checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd dist/linux-arm64
-          sha256sum \
-            dailylevels \
-            dailyplans \
-            lightercollector \
-            collectorarchive \
-            packagevalidator \
-            lighterexecutor \
-            researchreport \
+          mkdir -p systemd scripts
+          cp ../../deploy/systemd/*.service ../../deploy/systemd/*.timer systemd/
+          cp ../../scripts/archive-and-upload.sh scripts/
+          chmod 0755 scripts/archive-and-upload.sh
+          find . -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
             > SHA256SUMS
 
       - name: Show build

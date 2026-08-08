@@ -1,0 +1,18 @@
+[Unit]
+Description=Overnight Strategy - continuous Lighter market recorder
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=traderbot
+Group=traderbot
+EnvironmentFile=-/etc/overnight-strategy.env
+ExecStart=/opt/overnight-strategy/build/lightercollector -store /mnt/trading/recorder/lighter -health-port 8082
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

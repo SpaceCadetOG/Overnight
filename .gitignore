@@ -1,6 +1,7 @@
 # binaries
 bin/
 dist/
+build/
 
 # Go
 .gocache/
@@ -45,6 +46,8 @@ data/orderbook/
 data/recorder/
 data/snapshots/
 data/trade_windows/
+data/packages/
+data/reference-cycle1/
 
 # Generated research artifacts
 work/

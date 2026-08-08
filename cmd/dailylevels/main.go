@@ -142,7 +142,7 @@ func main() {
 	snapshots := make([]live.MarketSnapshot, 0, len(assets))
 
 	for _, asset := range assets {
-		market, ok := markets[asset.Symbol]
+		market, ok := markets[asset.MarketSymbol()]
 		if !ok {
 			fatal(fmt.Errorf(
 				"Lighter market metadata missing for %s",
@@ -195,22 +195,6 @@ func selectedAssets(
 	symbol string,
 	includeAll bool,
 ) ([]universe.Asset, error) {
-	// Default DAILY DISPLAY basket.
-	//
-	// The first five remain the only LIVE_EXECUTION assets.
-	// HYPE and LIT are displayed for research/observation only.
-	displaySymbols := []string{
-		"BTC",
-		"ETH",
-		"ZEC",
-		"BNB",
-		"SOL",
-		"HYPE",
-		"LIT",
-		"XAU",
-		"XAG",
-	}
-
 	if includeAll {
 		return universe.All(), nil
 	}
@@ -224,21 +208,9 @@ func selectedAssets(
 		return []universe.Asset{asset}, nil
 	}
 
-	assets := make([]universe.Asset, 0, len(displaySymbols))
-
-	for _, wanted := range displaySymbols {
-		asset, ok := universe.Find(wanted)
-		if !ok {
-			return nil, fmt.Errorf(
-				"%s is not registered in the asset universe",
-				wanted,
-			)
-		}
-
-		assets = append(assets, asset)
-	}
-
-	return assets, nil
+	// The default report is the complete frozen control universe. BTC and ETH
+	// are live-authorized; every other market remains paper-only.
+	return universe.All(), nil
 }
 
 func resolveDate(

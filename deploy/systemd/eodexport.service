@@ -1,0 +1,11 @@
+[Unit]
+Description=Overnight Strategy - EOD forensics and shadow ML export
+After=network-online.target lightercollector.service
+
+[Service]
+Type=oneshot
+User=traderbot
+Group=traderbot
+WorkingDirectory=/opt/overnight-strategy
+EnvironmentFile=-/etc/overnight-strategy.env
+ExecStart=/opt/overnight-strategy/build/eodexport -store /mnt/trading/research -out /mnt/trading/packages/pending -market-data-root /mnt/trading/recorder/lighter

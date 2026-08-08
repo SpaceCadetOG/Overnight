@@ -9,7 +9,7 @@ type RiskLimits struct {
 }
 
 func DefaultRiskLimits() RiskLimits {
-	return RiskLimits{PerTradePercent: 0.5, MaxBasketPercent: 2.0, MaxOpenPositions: 5}
+	return RiskLimits{PerTradePercent: 0.5, MaxBasketPercent: 2.0, MaxOpenPositions: 2}
 }
 
 func (r RiskLimits) Budget(equity float64, requested int) (perTrade, basket float64, err error) {

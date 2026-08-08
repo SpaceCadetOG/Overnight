@@ -13,6 +13,7 @@ import (
 
 	lighterclient "github.com/elliottech/lighter-go/client"
 	lighterhttp "github.com/elliottech/lighter-go/client/http"
+	lightertypes "github.com/elliottech/lighter-go/types"
 	"github.com/gorilla/websocket"
 )
 
@@ -36,6 +37,7 @@ type Market struct {
 	MinQuoteAmount any    `json:"min_quote_amount"`
 	PriceDecimals  int    `json:"supported_price_decimals"`
 	SizeDecimals   int    `json:"supported_size_decimals"`
+	MarkPrice      any    `json:"mark_price"`
 }
 
 type Snapshot struct {
@@ -90,6 +92,17 @@ func New(cfg Config) (*Client, error) {
 }
 
 func (c *Client) CheckCredentials() error { return c.signer.Check() }
+
+// ValidateCreateOrder signs and validates an exact order payload locally with
+// an explicit nonce. It never sends the transaction to Lighter.
+func (c *Client) ValidateCreateOrder(req *lightertypes.CreateOrderTxReq, nonce int64) error {
+	ops := &lightertypes.TransactOpts{Nonce: &nonce}
+	signed, err := c.signer.GetCreateOrderTransaction(req, ops)
+	if err != nil {
+		return err
+	}
+	return signed.Validate()
+}
 
 func (c *Client) authToken() (string, error) {
 	return c.signer.GetAuthToken(time.Now().Add(7 * time.Hour))
@@ -148,9 +161,22 @@ func (c *Client) CheckPrivateWebSocket(ctx context.Context) error {
 		return err
 	}
 	headers := http.Header{"Origin": []string{"https://lighter.xyz"}, "User-Agent": []string{"overnight-strategy-check/1.0"}}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.cfg.WSURL, headers)
+	var conn *websocket.Conn
+	for attempt := 1; attempt <= 3; attempt++ {
+		conn, _, err = websocket.DefaultDialer.DialContext(ctx, c.cfg.WSURL, headers)
+		if err == nil {
+			break
+		}
+		if attempt < 3 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("connect private WebSocket: %w", err)
+		return fmt.Errorf("connect private WebSocket after 3 attempts: %w", err)
 	}
 	defer conn.Close()
 	channel := "account_all_positions/" + strconv.FormatInt(c.cfg.AccountIndex, 10)

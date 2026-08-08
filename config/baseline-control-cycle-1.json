@@ -1,0 +1,31 @@
+{
+  "freeze_id": "cycle-1-baseline-v1-20260810",
+  "strategy_version": "baseline-v1-20260810",
+  "status": "IMMUTABLE_CONTROL",
+  "rules": {
+    "session_timezone": "America/Chicago",
+    "overnight_session": "19:00-05:00",
+    "direction": "overnight_close_relative_to_overnight_vwap",
+    "entry": "MIDPOINT_382_500",
+    "stop": "PROFILE_FIB",
+    "stop_buffer_bps": 2.0,
+    "tp1": "FIB_618",
+    "tp2": "OVERNIGHT_EXTREME",
+    "tp1_position_fraction": 0.5,
+    "tp2_position_fraction": 0.5,
+    "move_remaining_stop_to_breakeven_after_tp1": true,
+    "order_expiry": "16:00 America/Chicago"
+  },
+  "universe": {
+    "live_control": ["BTC", "ETH"],
+    "paper_research": ["SOL", "HYPE", "LIT", "XAU", "XAG", "LINK", "AAVE", "UNI", "ZEC", "BNB"]
+  },
+  "governance": {
+    "ml_may_mutate_control": false,
+    "shadow_levels_are_independent": true,
+    "shadow_orders_are_virtual_only": true,
+    "baseline_remains_permanent_comparator": true,
+    "changes_require_new_strategy_version": true,
+    "historical_control_rows_may_be_overwritten": false
+  }
+}

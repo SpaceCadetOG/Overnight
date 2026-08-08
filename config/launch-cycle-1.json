@@ -1,0 +1,69 @@
+{
+  "freeze_id": "cycle-1-baseline-v1-20260810",
+  "code_version": "cycle1-baseline-v1-20260810",
+  "strategy_version": "baseline-v1-20260810",
+  "cycle_start_utc": "2026-08-10T00:00:00Z",
+  "cycle_end_utc": "2026-09-09T00:00:00Z",
+  "timezone": "America/Chicago",
+  "overnight_session": "19:00-05:00 CT",
+  "entry_window": "05:00-05:05 CT",
+  "expiry": "16:00 CT",
+  "eod_export": "16:05 CT",
+  "schema_versions": {
+    "market_map": 1,
+    "trade_journal": 1,
+    "forensic_event": 1,
+    "checkpoint_manifest": 1,
+    "ml_prediction": 1,
+    "replay_assumptions": "lighter-replay-v1-20260810"
+  },
+  "identity_contract": {
+    "paper_live_pair_key": "opportunity_id",
+    "session_id": "stable per date, asset and strategy version",
+    "strategy_order_id": "stable per opportunity and strategy version",
+    "trade_id": "distinct per opportunity, mode and run",
+    "exchange_order_id": "venue or simulated order identity",
+    "timestamp_pairing_forbidden": true
+  },
+  "market_data_recording": {
+    "schedule": "00:00-23:59:59 UTC",
+    "continuous": true,
+    "markets": 12,
+    "streams": [
+      "reconstructed_l2_snapshots_and_deltas",
+      "public_trade_tape",
+      "confirmed_liquidations",
+      "inferred_liquidation_cascades",
+      "ticker",
+      "market_statistics"
+    ],
+    "strategy_session_does_not_pause_recording": true
+  },
+  "live_execution": ["BTC", "ETH"],
+  "paper_and_orderbook": ["SOL", "HYPE", "LIT", "XAU", "XAG", "LINK", "AAVE", "UNI", "ZEC", "BNB"],
+  "exchange_aliases": {},
+  "risk": {
+    "risk_per_trade_fraction": 0.005,
+    "maximum_basket_risk_fraction": 0.02
+  },
+  "control_exit": {
+    "tp1_position_fraction": 0.5,
+    "tp2_position_fraction": 0.5,
+    "move_remaining_stop_to_breakeven_after_tp1": true,
+    "tp3": "shadow_research_only"
+  },
+  "research_authority": "record_only_never_modifies_control",
+  "liquidation_schema": "liquidation-v1",
+  "liquidation_windows": ["-5s:+5s", "-30s:+30s", "-5m:+5m"],
+  "confirmed_liquidation_source": "lighter_public_trade_liquidation",
+  "inferred_liquidation_source": "order_flow_inference_v1",
+  "activation_state": "FROZEN_FOR_LOCAL_SOAK",
+  "funded_scheduler_enabled": false,
+  "activation_requires": [
+    "overnight_12_market_soak_pass",
+    "morning_data_coverage_report_pass",
+    "authenticated_reconciliation_pass",
+    "zero_unmanaged_orders_or_positions",
+    "explicit_scheduler_enable"
+  ]
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ogtrading/overnight-strategy/internal/marketdata/cache"
@@ -17,6 +18,7 @@ import (
 func main() {
 	days := flag.Int("days", 2, "number of UTC days to collect")
 	out := flag.String("out", "data/raw/lighter", "output directory")
+	symbolsFlag := flag.String("symbols", "", "optional comma-separated market symbols; default is the configured universe")
 	flag.Parse()
 	if *days <= 0 {
 		fatal(fmt.Errorf("days must be positive"))
@@ -30,27 +32,40 @@ func main() {
 	}
 	end := time.Now().UTC().Truncate(5 * time.Minute)
 	start := end.AddDate(0, 0, -*days)
-	for _, asset := range universe.All() {
-		market, ok := markets[asset.Symbol]
+	symbols := make([]string, 0)
+	if strings.TrimSpace(*symbolsFlag) == "" {
+		for _, asset := range universe.All() {
+			symbols = append(symbols, asset.MarketSymbol())
+		}
+	} else {
+		for _, symbol := range strings.Split(*symbolsFlag, ",") {
+			if symbol = strings.ToUpper(strings.TrimSpace(symbol)); symbol != "" {
+				symbols = append(symbols, symbol)
+			}
+		}
+	}
+	for _, symbol := range symbols {
+		market, ok := markets[symbol]
 		if !ok {
-			fatal(fmt.Errorf("Lighter market %s not found", asset.Symbol))
+			fatal(fmt.Errorf("Lighter market %s not found", symbol))
 		}
 		candles, err := client.Candles(ctx, market.MarketID, "5m", start, end)
 		if err != nil {
-			fatal(fmt.Errorf("%s candles: %w", asset.Symbol, err))
+			fatal(fmt.Errorf("%s candles: %w", symbol, err))
 		}
-		path := filepath.Join(*out, fmt.Sprintf("Lighter_%s_5m.csv", asset.Symbol))
+		path := filepath.Join(*out, fmt.Sprintf("Lighter_%s_5m.csv", symbol))
 		if err := cache.WriteCandlesCSV(path, candles); err != nil {
 			fatal(err)
 		}
 		funding, err := client.RawFundings(ctx, market.MarketID, start, end)
 		if err != nil {
-			fatal(fmt.Errorf("%s funding: %w", asset.Symbol, err))
+			fatal(fmt.Errorf("%s funding: %w", symbol, err))
 		}
-		if err := writeJSON(filepath.Join(*out, fmt.Sprintf("Lighter_%s_funding.json", asset.Symbol)), funding); err != nil {
+		if err := writeJSON(filepath.Join(*out, fmt.Sprintf("Lighter_%s_funding.json", symbol)), funding); err != nil {
 			fatal(err)
 		}
-		fmt.Printf("%s candles=%d market_id=%d research_only=%t\n", asset.Symbol, len(candles), market.MarketID, asset.ResearchOnly)
+		_, configured := universe.Find(symbol)
+		fmt.Printf("%s candles=%d market_id=%d configured=%t\n", symbol, len(candles), market.MarketID, configured)
 	}
 }
 

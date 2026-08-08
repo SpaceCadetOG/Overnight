@@ -87,6 +87,7 @@ func FromLive(snapshot live.MarketSnapshot, exchangeSymbol, version string, orde
 		Outcome: facts.Outcome, PlannedEntry: order.Price, ActualFill: facts.ActualFill,
 		ExitPrice: facts.ExitPrice, RMultiple: facts.RMultiple, MFE: facts.MFE, MAE: facts.MAE, TP1Hit: facts.TP1Hit,
 	}
+	record.ExchangeOrderID = facts.OrderID
 	if facts.ActualFill > 0 && order.Price > 0 {
 		record.EntrySlippage = math.Abs(facts.ActualFill - order.Price)
 		record.EntrySlippageBPS = record.EntrySlippage / order.Price * 10000

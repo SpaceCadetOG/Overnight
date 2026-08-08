@@ -2,8 +2,6 @@ package execution
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,13 +28,12 @@ func TestKillSwitchOverridesApproval(t *testing.T) {
 	}
 }
 
-func TestLiveGateRequiresFreshApproval(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "approve")
-	if err := os.WriteFile(path, []byte("approved\n"), 0o600); err != nil {
+func TestLiveGateUsesCanonicalAllowlist(t *testing.T) {
+	gate := Gate{Mode: Live, AllowedSymbols: map[string]bool{"BTC": true, "ETH": true}}
+	if err := gate.Authorize("BTC", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	gate := Gate{Mode: Live, ApprovalPath: path, ApprovalMaxAge: time.Minute, AllowedSymbols: map[string]bool{"BTC": true}}
-	if err := gate.Authorize("BTC", time.Now()); err != nil {
+	if err := gate.Authorize("ETH", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := gate.Authorize("SOL", time.Now()); err == nil {
@@ -44,12 +41,12 @@ func TestLiveGateRequiresFreshApproval(t *testing.T) {
 	}
 }
 
-func TestRiskBudgetCapsFiveAssetsAtBasketLimit(t *testing.T) {
-	perTrade, basket, err := DefaultRiskLimits().Budget(100, 5)
+func TestRiskBudgetMatchesTwoAssetLiveRollout(t *testing.T) {
+	perTrade, basket, err := DefaultRiskLimits().Budget(100, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perTrade != 0.4 || basket != 2 {
+	if perTrade != 0.5 || basket != 2 {
 		t.Fatalf("perTrade=%v basket=%v", perTrade, basket)
 	}
 }

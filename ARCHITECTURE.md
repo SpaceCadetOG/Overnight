@@ -2,26 +2,20 @@
 
 ## Operating principle
 
-The production system runs five independent instances of the same frozen
+The initial production system runs two independent instances of the same frozen
 baseline strategy:
 
 - BTC
 - ETH
-- ZEC
-- BNB
-- SOL
 
 The basket is a combined research view, not an asset-selection signal. Each
 asset produces its own market map, trade plan, order, lifecycle, and result.
 There is no rotation, ranking, shared signal, or adaptive allocation in the
 baseline.
 
-The market-intelligence system also observes four non-trading markets:
-
-- LINK
-- HYPE
-- XAU
-- XAG
+The market-intelligence system runs the identical paper/research pipeline for
+SOL, HYPE, LIT, XAU, XAG, LINK, AAVE, UNI, ZEC, and BNB. The authoritative
+12-market list lives in `internal/universe/assets.go`.
 
 These instruments receive the same daily market-map calculations and research
 records, but they can never create an order. Observation does not imply
@@ -33,11 +27,14 @@ eligibility for capital.
 |---|---|---:|---:|
 | BTC | Crypto | Yes | Yes |
 | ETH | Crypto | Yes | Yes |
-| ZEC | Crypto | Yes | Yes |
-| BNB | Crypto | Yes | Yes |
-| SOL | Crypto | Yes | Yes |
-| LINK | Crypto | Yes | No — research |
-| HYPE | Crypto | Yes | No — research |
+| SOL | Crypto | Yes | Paper/research only |
+| HYPE | Crypto | Yes | Paper/research only |
+| LIT | Crypto | Yes | Paper/research only |
+| LINK | Crypto | Yes | Paper/research only |
+| AAVE | Crypto | Yes | Paper/research only |
+| UNI | Crypto | Yes | Paper/research only |
+| ZEC | Crypto | Yes | Paper/research only |
+| BNB | Crypto | Yes | Paper/research only |
 | XAU | Metals | Yes | No — valid research market |
 | XAG | Metals | Yes | No — observe only |
 
@@ -70,9 +67,9 @@ map for every production asset.
                              Exchange
 ```
 
-The daily output is five independent market maps, five independent trade plans,
-up to five resting orders, four additional observation-only market maps, and one
-shared research database.
+The initial live output is two independent trade plans and up to two resting
+orders. All other registered assets remain in the paper/research universe until
+promotion is supported by daily evidence.
 
 ```text
                               05:00 CT
@@ -81,7 +78,7 @@ shared research database.
                     |                           |
             Live trading maps              Research maps
                     |                           |
-          BTC ETH ZEC BNB SOL           LINK HYPE XAU XAG
+               BTC ETH              ZEC BNB SOL LINK HYPE LIT XAU XAG
                     |                           |
           Plans and possible orders          Data only
                     +-------------+-------------+
@@ -167,6 +164,19 @@ Record market and execution context where available:
 
 This layer explains execution and outcomes. It has no production authority.
 
+### Liquidation/order-flow correlation
+
+Every explicit public `liquidation_trades` item is a confirmed liquidation and
+is joined to its market, exchange and receipt timestamps, price/size/USD value,
+aggressor and liquidated-position side, transaction hash, reconstructed L2
+state, depth, spread, imbalance, microprice, and tape context. Research uses
+fixed ±5-second, ±30-second, and ±5-minute windows.
+
+Heuristic cascade detections are stored separately as
+`inferred_liquidation_cascades` with `confirmed=false`. They may describe
+one-sided aggression and displacement but may never be promoted to confirmed
+labels without explicit exchange evidence.
+
 ## Per-asset order lifecycle
 
 Every valid daily plan can create its own resting order. A filled order is
@@ -198,6 +208,16 @@ consideration. These results authorize continued data collection only; they do
 not authorize execution.
 
 ## Research data model
+
+The canonical truth is the append-only `forensic_events` stream. Market maps,
+trade journals, case files, reports, and ML rows are versioned projections and
+can be rebuilt. Stable `opportunity_id` pairs paper and live executions; their
+`trade_id` and exchange-order IDs remain distinct. Approximate timestamp joins
+are forbidden for paper/live pairing.
+
+All ML predictions are written only to `ml_shadow_predictions` with
+`shadow_only=true`. The ML package has no executor dependency or order-routing
+interface and cannot mutate the frozen plan.
 
 The asset registry must distinguish eligibility from observation:
 
@@ -256,7 +276,7 @@ and live shadow evidence.
 
 ## Thirty-day question
 
-The first live experiment asks whether five independent baseline instances
+The first live experiment asks whether the BTC and ETH baseline instances
 reproduce their historical expectancy under real Lighter execution. Only after
 that period may research evaluate asset allocation, filters, or adaptive risk.
 

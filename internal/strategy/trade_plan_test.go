@@ -7,6 +7,20 @@ import (
 	"github.com/ogtrading/overnight-strategy/internal/models"
 )
 
+// This is the code-level guard for the permanent Cycle 1 control. Research and
+// ML challengers must use separate configuration and versions; changing any of
+// these defaults silently would invalidate the historical control comparison.
+func TestCycle1BaselineDefaultsRemainFrozen(t *testing.T) {
+	config := DefaultPlanConfig()
+	if config.EntryMethod != EntryMidpoint ||
+		config.StopMethod != StopProfileFib ||
+		config.TP1Method != TP1Fib618 ||
+		config.StopBufferBPS != 2.0 ||
+		config.MinimumPOCRR != 0.75 {
+		t.Fatalf("Cycle 1 baseline defaults changed: %+v", config)
+	}
+}
+
 func TestDefaultLongTradePlan(t *testing.T) {
 	session := models.Session{
 		Bias:   models.BiasLong,

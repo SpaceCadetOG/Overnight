@@ -5,10 +5,26 @@ artifact_dir=${1:?artifact directory is required}
 commit=${2:?git commit is required}
 host=${TRADEPI_SSH_HOST:-traderbot@192.168.3.28}
 staging="/opt/overnight-strategy/releases/$commit"
+required="lightercollector dailyplans eodexport tradedashboard collectorarchive packagevalidator lighterexecutor"
+
+for binary in $required; do
+    [ -x "$artifact_dir/$binary" ] || {
+        printf '%s\n' "missing release binary: $artifact_dir/$binary" >&2
+        exit 1
+    }
+done
+[ -f "$artifact_dir/systemd/lightercollector.service" ] || {
+    printf '%s\n' "release is missing systemd definitions" >&2
+    exit 1
+}
+[ -x "$artifact_dir/scripts/archive-and-upload.sh" ] || {
+    printf '%s\n' "release is missing archive lifecycle script" >&2
+    exit 1
+}
 
 ssh "$host" "mkdir -p '$staging'"
-scp "$artifact_dir/lightercollector" "$artifact_dir/collectorarchive" "$artifact_dir/packagevalidator" "$artifact_dir/SHA256SUMS" "$host:$staging/"
-ssh "$host" "cd '$staging' && sha256sum --check SHA256SUMS --ignore-missing"
+scp -r "$artifact_dir/." "$host:$staging/"
+ssh "$host" "cd '$staging' && sha256sum --check SHA256SUMS"
 ssh "$host" "sudo /opt/overnight-strategy/scripts/activate-release.sh '$commit'"
 
 attempt=0

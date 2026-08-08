@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	lightertx "github.com/elliottech/lighter-go/types/txtypes"
+	executionlighter "github.com/ogtrading/overnight-strategy/internal/execution/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
@@ -47,22 +49,39 @@ func main() {
 	if err := client.CheckCredentials(); err != nil {
 		fail("authenticated account snapshot", err)
 	}
-	snapshot, err := client.ReadSnapshot(ctx, markets)
+	liveMarkets := make([]lighterexec.Market, 0, len(universe.Live()))
+	for _, market := range markets {
+		for _, asset := range universe.Live() {
+			if market.Symbol == asset.MarketSymbol() {
+				liveMarkets = append(liveMarkets, market)
+			}
+		}
+	}
+	if len(liveMarkets) != len(universe.Live()) {
+		fail("live market discovery", fmt.Errorf("expected %d live markets, found %d", len(universe.Live()), len(liveMarkets)))
+	}
+	snapshot, err := client.ReadSnapshot(ctx, liveMarkets)
 	if err != nil {
 		fail("authenticated account snapshot", err)
+	}
+	precision := []map[string]any{}
+	payloads := []map[string]any{}
+	for _, asset := range universe.Live() {
+		for _, market := range markets {
+			if market.Symbol == asset.MarketSymbol() {
+				precision = append(precision, map[string]any{"symbol": market.Symbol, "market_id": market.MarketID, "status": market.Status, "minimum_base": market.MinBaseAmount, "minimum_notional": market.MinQuoteAmount, "price_decimals": market.PriceDecimals, "quantity_decimals": market.SizeDecimals})
+				built, err := validatePayloads(market, client)
+				if err != nil {
+					fail("order payload validation", err)
+				}
+				payloads = append(payloads, built)
+			}
+		}
 	}
 	wsCtx, wsCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer wsCancel()
 	if err := client.CheckPrivateWebSocket(wsCtx); err != nil {
 		fail("private WebSocket", err)
-	}
-	precision := []map[string]any{}
-	for _, asset := range universe.Live() {
-		for _, market := range markets {
-			if market.Symbol == asset.Symbol {
-				precision = append(precision, map[string]any{"symbol": market.Symbol, "market_id": market.MarketID, "status": market.Status, "minimum_base": market.MinBaseAmount, "minimum_notional": market.MinQuoteAmount, "price_decimals": market.PriceDecimals, "quantity_decimals": market.SizeDecimals})
-			}
-		}
 	}
 	accountSummary := map[string]any{}
 	for _, key := range []string{"account_index", "account_type", "account_trading_mode", "status", "collateral", "available_balance", "total_asset_value", "pending_order_count"} {
@@ -75,10 +94,62 @@ func main() {
 		"public_connectivity": "PASS", "authenticated_account_snapshot": "PASS",
 		"balances_equity": "PASS", "positions": "PASS", "active_orders": "PASS",
 		"recent_fills_trades": "PASS", "private_websocket": "PASS",
-		"position_count": len(snapshot.Positions), "active_order_count": len(snapshot.Orders),
+		"position_record_count": len(snapshot.Positions), "open_position_count": countOpenPositions(snapshot.Positions), "active_order_count": len(snapshot.Orders),
 		"recent_fill_count": len(snapshot.Fills), "mode": "read_reconcile", "automated_orders": false,
-		"account": accountSummary, "market_precision": precision,
+		"account": accountSummary, "market_precision": precision, "order_payload_validation": payloads,
 	})
+}
+
+func countOpenPositions(positions []map[string]any) int {
+	count := 0
+	for _, position := range positions {
+		value, err := strconv.ParseFloat(fmt.Sprint(position["position"]), 64)
+		if err == nil && value != 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func validatePayloads(market lighterexec.Market, client *lighterexec.Client) (map[string]any, error) {
+	configured, err := executionlighter.MarketFor(market.Symbol)
+	if err != nil {
+		return nil, err
+	}
+	if configured.Index != market.MarketID || configured.PriceDecimals != market.PriceDecimals || configured.SizeDecimals != market.SizeDecimals {
+		return nil, fmt.Errorf("%s configured precision/index does not match Lighter metadata", market.Symbol)
+	}
+	price, err := strconv.ParseFloat(fmt.Sprint(market.MarkPrice), 64)
+	if err != nil || price <= 0 {
+		return nil, fmt.Errorf("%s invalid mark price", market.Symbol)
+	}
+	quantity, err := strconv.ParseFloat(fmt.Sprint(market.MinBaseAmount), 64)
+	if err != nil || quantity <= 0 {
+		return nil, fmt.Errorf("%s invalid minimum size", market.Symbol)
+	}
+	// Four minimum units keep both 50% exits independently valid.
+	quantity *= 4
+	expiry := time.Now().Add(time.Hour)
+	index := time.Now().UnixMilli()
+	requests := []executionlighter.OrderRequest{
+		{Symbol: market.Symbol, Side: executionlighter.Buy, Price: price, Quantity: quantity, ClientOrderIndex: index, Expiry: expiry, Type: lightertx.LimitOrder},
+		{Symbol: market.Symbol, Side: executionlighter.Sell, Price: price * .99, Quantity: quantity, ClientOrderIndex: index + 1, Expiry: expiry, Type: lightertx.StopLossOrder, ReduceOnly: true, TriggerPrice: price * .99},
+		{Symbol: market.Symbol, Side: executionlighter.Sell, Price: price * 1.01, Quantity: quantity / 2, ClientOrderIndex: index + 2, Expiry: expiry, Type: lightertx.TakeProfitOrder, ReduceOnly: true, TriggerPrice: price * 1.01},
+		{Symbol: market.Symbol, Side: executionlighter.Sell, Price: price * 1.02, Quantity: quantity / 2, ClientOrderIndex: index + 3, Expiry: expiry, Type: lightertx.TakeProfitOrder, ReduceOnly: true, TriggerPrice: price * 1.02},
+	}
+	for offset, request := range requests {
+		tx, err := executionlighter.BuildCreateOrder(request)
+		if err != nil {
+			return nil, err
+		}
+		if err := client.ValidateCreateOrder(tx, int64(offset+1)); err != nil {
+			return nil, fmt.Errorf("%s local signature validation: %w", market.Symbol, err)
+		}
+	}
+	if _, err := executionlighter.BuildCancelOrder(market.Symbol, index); err != nil {
+		return nil, err
+	}
+	return map[string]any{"symbol": market.Symbol, "entry": "PASS", "stop": "PASS", "tp1": "PASS", "breakeven": "PASS", "tp2": "PASS", "cancel": "PASS", "close": "PASS", "submitted": false}, nil
 }
 
 func configFromEnv() (lighterexec.Config, error) {

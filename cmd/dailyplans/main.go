@@ -150,6 +150,7 @@ func main() {
 					record.SessionID = lifecycle[0].SessionID
 					record.OpportunityID = lifecycle[0].OpportunityID
 					record.StrategyOrderID = lifecycle[0].StrategyOrderID
+					record.ExchangeOrderID = lifecycle[0].OrderID
 					record.CaseID = lifecycle[0].CaseID
 					record.RunID = lifecycle[0].RunID
 				}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Overnight Strategy - hourly detailed paper and ML control room
+After=lightercollector.service
+
+[Service]
+Type=simple
+User=traderbot
+Group=traderbot
+EnvironmentFile=-/etc/overnight-strategy.env
+ExecStart=/opt/overnight-strategy/build/tradedashboard -store /mnt/trading/research -paper-equity=100 -view=detailed -refresh=1h
+Restart=always
+RestartSec=5
