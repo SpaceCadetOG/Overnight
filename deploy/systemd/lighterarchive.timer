@@ -1,0 +1,10 @@
+[Unit]
+Description=Overnight Strategy - Daily Lighter archive lifecycle
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

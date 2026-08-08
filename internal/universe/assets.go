@@ -11,11 +11,11 @@ const (
 
 	LiveExecution Classification = "LIVE_EXECUTION"
 	Research      Classification = "RESEARCH"
-	ObserveOnly   Classification = "OBSERVE_ONLY"
 )
 
 type Asset struct {
 	Symbol         string         `json:"symbol"`
+	ExchangeSymbol string         `json:"exchange_symbol"`
 	Class          AssetClass     `json:"asset_class"`
 	Exchange       string         `json:"exchange"`
 	Classification Classification `json:"classification"`
@@ -26,18 +26,28 @@ type Asset struct {
 var assets = []Asset{
 	{Symbol: "BTC", Class: Crypto, Exchange: "lighter", Classification: LiveExecution, Tradable: true},
 	{Symbol: "ETH", Class: Crypto, Exchange: "lighter", Classification: LiveExecution, Tradable: true},
-	{Symbol: "ZEC", Class: Crypto, Exchange: "lighter", Classification: LiveExecution, Tradable: true},
-	{Symbol: "BNB", Class: Crypto, Exchange: "lighter", Classification: LiveExecution, Tradable: true},
-	{Symbol: "SOL", Class: Crypto, Exchange: "lighter", Classification: LiveExecution, Tradable: true},
 
-	// Research assets — full daily levels, no execution authority.
-	{Symbol: "LINK", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	// Research assets receive the complete pipeline in paper mode but never route
+	// to the funded executor.
+	{Symbol: "SOL", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
 	{Symbol: "HYPE", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
 	{Symbol: "LIT", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
 	{Symbol: "XAU", Class: Metals, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	{Symbol: "XAG", Class: Metals, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	{Symbol: "LINK", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	{Symbol: "AAVE", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	{Symbol: "UNI", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	{Symbol: "ZEC", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+	{Symbol: "BNB", Class: Crypto, Exchange: "lighter", Classification: Research, ResearchOnly: true},
+}
 
-	// Observation only.
-	{Symbol: "XAG", Class: Metals, Exchange: "lighter", Classification: ObserveOnly, ResearchOnly: true},
+// MarketSymbol is the exchange-native market name. Symbol remains the stable
+// research/reporting identity so exchange aliases never leak into experiments.
+func (a Asset) MarketSymbol() string {
+	if a.ExchangeSymbol != "" {
+		return a.ExchangeSymbol
+	}
+	return a.Symbol
 }
 
 func All() []Asset { return append([]Asset(nil), assets...) }

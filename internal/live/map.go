@@ -18,6 +18,10 @@ type PreviousDay struct {
 }
 
 type MarketSnapshot struct {
+	SchemaVersion     int               `json:"schema_version"`
+	StrategyVersion   string            `json:"strategy_version,omitempty"`
+	SessionID         string            `json:"session_id,omitempty"`
+	OpportunityID     string            `json:"opportunity_id,omitempty"`
 	Timestamp         time.Time         `json:"timestamp"`
 	Symbol            string            `json:"symbol"`
 	Classification    string            `json:"classification"`
@@ -61,17 +65,17 @@ func BuildMarketSnapshot(symbol string, candles []models.Candle, location *time.
 		return MarketSnapshot{}, err
 	}
 	snapshot := MarketSnapshot{
-		Timestamp: time.Now().UTC(), Symbol: symbol, Classification: string(asset.Classification), SessionDate: value.Date,
+		SchemaVersion: 1, Timestamp: time.Now().UTC(), Symbol: symbol, Classification: string(asset.Classification), SessionDate: value.Date,
 		OvernightHigh: value.High, OvernightLow: value.Low, OvernightRange: value.High - value.Low,
 		OvernightMidpoint: (value.High + value.Low) / 2, SessionClose: value.Close,
 		Fib382: value.Fib382, Fib500: value.Fib500, Fib618: value.Fib618,
 		VWAP: value.VWAP, POC: value.POC, VAH: value.VAH, VAL: value.VAL,
 		PreviousDay: previous, Liquidity: liquidity.DetectLevels(value.Candles), OrderAuthorized: asset.Tradable,
 	}
-	if asset.Tradable {
-		plan := strategy.BuildTradePlan(value, strategy.DefaultStopBufferBPS)
-		snapshot.Plan = &plan
-	}
+	// Every observed market receives the frozen baseline plan for paper research.
+	// OrderAuthorized remains the hard funded-execution boundary.
+	plan := strategy.BuildTradePlan(value, strategy.DefaultStopBufferBPS)
+	snapshot.Plan = &plan
 	return snapshot, nil
 }
 

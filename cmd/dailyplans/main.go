@@ -9,12 +9,16 @@ import (
 	"time"
 
 	"github.com/ogtrading/overnight-strategy/internal/execution"
+	"github.com/ogtrading/overnight-strategy/internal/forensics"
+	"github.com/ogtrading/overnight-strategy/internal/journal"
 	"github.com/ogtrading/overnight-strategy/internal/live"
 	lighterdata "github.com/ogtrading/overnight-strategy/internal/marketdata/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/models"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
+
+const strategyVersion = "baseline-v1-20260810"
 
 func main() {
 	root := flag.String("store", "data/research", "research event store")
@@ -53,10 +57,18 @@ func main() {
 		fatal(err)
 	}
 	existing := live.LatestIntents(existingEvents)
+	existingForensicEvents, err := store.ReadAll[forensics.Envelope](*root, "forensic_events")
+	if err != nil {
+		fatal(err)
+	}
+	seenForensicEvents := map[string]bool{}
+	for _, event := range existingForensicEvents {
+		seenForensicEvents[event.EventID] = true
+	}
 	for _, asset := range universe.All() {
-		market, ok := markets[asset.Symbol]
+		market, ok := markets[asset.MarketSymbol()]
 		if !ok {
-			fatal(fmt.Errorf("market %s missing", asset.Symbol))
+			fatal(fmt.Errorf("market %s (%s) missing", asset.Symbol, asset.MarketSymbol()))
 		}
 		candles, err := client.Candles(ctx, market.MarketID, "5m", start, end)
 		if err != nil {
@@ -66,19 +78,31 @@ func main() {
 		if err != nil {
 			fatal(fmt.Errorf("%s snapshot: %w", asset.Symbol, err))
 		}
-		if err := events.Append("market_snapshots", snapshot); err != nil {
-			fatal(err)
-		}
 		if snapshot.Plan != nil && snapshot.Plan.Valid {
-			intent, err := live.BuildIntent(asset.Symbol, *snapshot.Plan, riskPerTrade)
+			paperIntent, err := live.BuildPaperIntent(asset.Symbol, *snapshot.Plan, riskPerTrade)
 			if err != nil {
 				fatal(err)
 			}
-			intent = live.MarkDryRun(intent)
-			intents = append(intents, intent)
-			if _, alreadyGenerated := existing[intent.ID]; !alreadyGenerated {
-				if err := events.Append("strategy_intents", intent); err != nil {
+			paperIntent = live.MarkDryRun(paperIntent)
+			runID := "run_paper_" + strategyVersion + "_" + snapshot.SessionDate.Format("20060102")
+			ids := forensics.IDs(snapshot.SessionDate, asset.Symbol, strategyVersion, forensics.PlanOpportunityKey(*snapshot.Plan), "PAPER", runID)
+			snapshot.StrategyVersion, snapshot.SessionID, snapshot.OpportunityID = strategyVersion, ids.SessionID, ids.OpportunityID
+			paperIntent.ID, paperIntent.SessionID, paperIntent.OpportunityID, paperIntent.StrategyOrderID = ids.StrategyOrderID, ids.SessionID, ids.OpportunityID, ids.StrategyOrderID
+			if err := events.Append("paper_strategy_intents", paperIntent); err != nil {
+				fatal(err)
+			}
+			if snapshot.OrderAuthorized {
+				intent, err := live.BuildIntent(asset.Symbol, *snapshot.Plan, riskPerTrade)
+				if err != nil {
 					fatal(err)
+				}
+				intent = live.MarkDryRun(intent)
+				intent.ID, intent.SessionID, intent.OpportunityID, intent.StrategyOrderID = ids.StrategyOrderID, ids.SessionID, ids.OpportunityID, ids.StrategyOrderID
+				intents = append(intents, intent)
+				if _, alreadyGenerated := existing[intent.ID]; !alreadyGenerated {
+					if err := events.Append("strategy_intents", intent); err != nil {
+						fatal(err)
+					}
 				}
 			}
 			if !*dryRun {
@@ -94,7 +118,7 @@ func main() {
 					side = "SELL"
 				}
 				expiry := time.Date(snapshot.SessionDate.Year(), snapshot.SessionDate.Month(), snapshot.SessionDate.Day(), 16, 0, 0, 0, location)
-				order := spec.Normalize(execution.Order{Symbol: asset.Symbol, Side: side, Price: snapshot.Plan.Entry, Quantity: intent.Quantity, Stop: snapshot.Plan.Stop, TP1: snapshot.Plan.TP1, TP2: snapshot.Plan.TP2, ExpiresAt: expiry.Unix()})
+				order := spec.Normalize(execution.Order{Symbol: asset.MarketSymbol(), Side: side, Price: snapshot.Plan.Entry, Quantity: paperIntent.Quantity, Stop: snapshot.Plan.Stop, TP1: snapshot.Plan.TP1, TP2: snapshot.Plan.TP2, ExpiresAt: expiry.Unix()})
 				if err := spec.Validate(order); err != nil {
 					fatal(fmt.Errorf("%s precision: %w", asset.Symbol, err))
 				}
@@ -102,11 +126,40 @@ func main() {
 				if err != nil {
 					fatal(err)
 				}
+				paper.SessionDate, paper.SessionID, paper.OpportunityID, paper.StrategyOrderID, paper.TradeID, paper.RunID = snapshot.SessionDate, ids.SessionID, ids.OpportunityID, ids.StrategyOrderID, ids.TradeID, ids.RunID
 				paperTrades = append(paperTrades, paper)
 				if err := events.Append("paper_trades", paper); err != nil {
 					fatal(err)
 				}
+				lifecycle, err := forensics.PaperLifecycle(snapshot, paper, strategyVersion, runID)
+				if err != nil {
+					fatal(err)
+				}
+				for _, event := range lifecycle {
+					if seenForensicEvents[event.EventID] {
+						continue
+					}
+					if err := events.Append("forensic_events", event); err != nil {
+						fatal(err)
+					}
+					seenForensicEvents[event.EventID] = true
+				}
+				record := journal.FromPaper(snapshot, asset.MarketSymbol(), strategyVersion, paper)
+				if len(lifecycle) > 0 {
+					record.ID = lifecycle[0].TradeID
+					record.SessionID = lifecycle[0].SessionID
+					record.OpportunityID = lifecycle[0].OpportunityID
+					record.StrategyOrderID = lifecycle[0].StrategyOrderID
+					record.CaseID = lifecycle[0].CaseID
+					record.RunID = lifecycle[0].RunID
+				}
+				if err := events.Append("trade_journal", record); err != nil {
+					fatal(err)
+				}
 			}
+		}
+		if err := events.Append("market_snapshots", snapshot); err != nil {
+			fatal(err)
 		}
 		printJSON(map[string]any{"symbol": asset.Symbol, "classification": asset.Classification, "order_authorized": snapshot.OrderAuthorized, "plan": snapshot.Plan})
 	}

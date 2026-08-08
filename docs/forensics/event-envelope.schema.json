@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trade-forensics/event-envelope/v1",
+  "type": "object",
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "recorded_at", "session_id", "symbol", "venue", "mode", "strategy_version", "run_id", "source", "sequence", "payload"],
+  "properties": {
+    "event_id": {"type": "string", "pattern": "^evt_"},
+    "event_type": {"type": "string"},
+    "schema_version": {"const": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "session_id": {"type": "string", "pattern": "^ses_"},
+    "opportunity_id": {"type": "string", "pattern": "^opp_"},
+    "trade_id": {"type": "string", "pattern": "^trd_"},
+    "order_id": {"type": "string", "pattern": "^ord_"},
+    "position_id": {"type": "string", "pattern": "^pos_"},
+    "case_id": {"type": "string", "pattern": "^case_"},
+    "symbol": {"type": "string"},
+    "venue": {"const": "LIGHTER"},
+    "mode": {"enum": ["PAPER", "LIVE", "BACKTEST", "COUNTERFACTUAL"]},
+    "strategy_version": {"type": "string"},
+    "run_id": {"type": "string"},
+    "source": {"type": "string"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "payload": {"type": ["object", "array", "string", "number", "boolean", "null"]}
+  },
+  "additionalProperties": false
+}

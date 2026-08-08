@@ -1,0 +1,13 @@
+[Unit]
+Description=Overnight Strategy - Archive and upload closed Lighter day
+After=network-online.target lightercollector.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=traderbot
+WorkingDirectory=/opt/overnight-strategy
+EnvironmentFile=-/etc/overnight-cloud.env
+ExecStart=/opt/overnight-strategy/scripts/archive-and-upload.sh
+Nice=10
+IOSchedulingClass=idle

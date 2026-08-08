@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ogtrading/overnight-strategy/internal/buildinfo"
 	"github.com/ogtrading/overnight-strategy/internal/collector"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 )
@@ -19,8 +20,19 @@ func main() {
 	root := flag.String("store", "data/live/lighter", "append-only event store")
 	port := flag.String("health-port", "8082", "health endpoint port")
 	flag.Parse()
-	events, err := store.NewJSONL(*root)
+	location, err := time.LoadLocation("America/Chicago")
 	if err != nil {
+		fatal(err)
+	}
+	events, err := store.NewDailyJSONL(*root, location)
+	if err != nil {
+		fatal(err)
+	}
+	if err := events.Append("collector_metadata", map[string]any{
+		"recorded_at": time.Now().UTC(), "schema_version": 1,
+		"collector_version": buildinfo.Version, "git_commit": buildinfo.Commit,
+		"built_at": buildinfo.BuiltAt,
+	}); err != nil {
 		fatal(err)
 	}
 	c := collector.New(os.Getenv("LIGHTER_BASE_URL"), os.Getenv("LIGHTER_WS_URL"), events)

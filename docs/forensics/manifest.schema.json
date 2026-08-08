@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trade-forensics/package-manifest/v2",
+  "type": "object",
+  "required": ["schema_version", "package_id", "collector_version", "collector_commit", "exchange", "date", "timezone", "generated_at", "files", "records", "raw_bytes", "nonce_gaps", "websocket_errors", "reconnects", "first_event", "last_event", "assets", "complete"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "package_id": {"type": "string"},
+    "prior_package_id": {"type": "string"},
+    "collector_version": {"type": "string"},
+    "collector_commit": {"type": "string"},
+    "exchange": {"const": "lighter"},
+    "date": {"type": "string", "format": "date"},
+    "timezone": {"const": "America/Chicago"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "files": {"type": "array", "minItems": 1},
+    "records": {"type": "integer", "minimum": 1},
+    "raw_bytes": {"type": "integer", "minimum": 1},
+    "nonce_gaps": {"type": "integer", "minimum": 0},
+    "websocket_errors": {"type": "integer", "minimum": 0},
+    "reconnects": {"type": "integer", "minimum": 0},
+    "first_event": {"type": "string", "format": "date-time"},
+    "last_event": {"type": "string", "format": "date-time"},
+    "assets": {"type": "array", "items": {"type": "string"}},
+    "missing_assets": {"type": "array", "items": {"type": "string"}},
+    "complete": {"type": "boolean"}
+  }
+}

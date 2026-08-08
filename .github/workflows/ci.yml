@@ -103,11 +103,19 @@ jobs:
 
       - name: Build Lighter collector
         run: |
+          BUILT_AT="$(date -u +%FT%TZ)"
           go build \
             -trimpath \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Version=${GITHUB_REF_NAME} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Commit=${GITHUB_SHA} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.BuiltAt=${BUILT_AT}" \
             -o dist/linux-arm64/lightercollector \
             ./cmd/lightercollector
+
+      - name: Build archive and validation tools
+        run: |
+          BUILT_AT="$(date -u +%FT%TZ)"
+          LDFLAGS="-s -w -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Version=${GITHUB_REF_NAME} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.Commit=${GITHUB_SHA} -X github.com/ogtrading/overnight-strategy/internal/buildinfo.BuiltAt=${BUILT_AT}"
+          go build -trimpath -ldflags="$LDFLAGS" -o dist/linux-arm64/collectorarchive ./cmd/collectorarchive
+          go build -trimpath -ldflags="$LDFLAGS" -o dist/linux-arm64/packagevalidator ./cmd/packagevalidator
 
       - name: Build Lighter executor
         run: |
@@ -133,6 +141,8 @@ jobs:
             dailylevels \
             dailyplans \
             lightercollector \
+            collectorarchive \
+            packagevalidator \
             lighterexecutor \
             researchreport \
             > SHA256SUMS
@@ -149,3 +159,29 @@ jobs:
           path: dist/linux-arm64/
           if-no-files-found: error
           retention-days: 14
+
+  deploy-tradepi:
+    name: Deploy collector through JumpPi
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [build-pi]
+    runs-on: [self-hosted, linux, arm64, jumppi]
+    environment: tradepi-production
+    concurrency:
+      group: tradepi-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout deployment scripts
+        uses: actions/checkout@v4
+
+      - name: Download verified ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: overnight-linux-arm64
+          path: dist/linux-arm64
+
+      - name: Verify artifact checksums
+        working-directory: dist/linux-arm64
+        run: sha256sum --check SHA256SUMS
+
+      - name: Deploy atomically and verify health
+        run: scripts/deploy-tradepi.sh dist/linux-arm64 "${GITHUB_SHA}"

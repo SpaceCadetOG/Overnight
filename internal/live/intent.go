@@ -27,15 +27,19 @@ const (
 )
 
 type Intent struct {
-	ID             string           `json:"id"`
-	CreatedAt      time.Time        `json:"created_at"`
-	Symbol         string           `json:"symbol"`
-	Plan           models.TradePlan `json:"plan"`
-	RiskUSD        float64          `json:"risk_usd"`
-	Quantity       float64          `json:"quantity"`
-	State          IntentState      `json:"state"`
-	AutomatedOrder bool             `json:"automated_order"`
-	Reason         string           `json:"reason,omitempty"`
+	ID              string           `json:"id"`
+	SchemaVersion   int              `json:"schema_version"`
+	SessionID       string           `json:"session_id,omitempty"`
+	OpportunityID   string           `json:"opportunity_id,omitempty"`
+	StrategyOrderID string           `json:"strategy_order_id,omitempty"`
+	CreatedAt       time.Time        `json:"created_at"`
+	Symbol          string           `json:"symbol"`
+	Plan            models.TradePlan `json:"plan"`
+	RiskUSD         float64          `json:"risk_usd"`
+	Quantity        float64          `json:"quantity"`
+	State           IntentState      `json:"state"`
+	AutomatedOrder  bool             `json:"automated_order"`
+	Reason          string           `json:"reason,omitempty"`
 }
 
 type RiskPolicy struct {
@@ -45,13 +49,26 @@ type RiskPolicy struct {
 }
 
 func DefaultRiskPolicy() RiskPolicy {
-	return RiskPolicy{RiskPerAssetUSD: 0.20, MaxBasketRiskUSD: 1.00, MaxPositions: 5}
+	return RiskPolicy{RiskPerAssetUSD: 0.50, MaxBasketRiskUSD: 2.00, MaxPositions: 2}
 }
 
 func BuildIntent(symbol string, plan models.TradePlan, riskUSD float64) (Intent, error) {
 	if _, err := universe.RequireTradable(symbol); err != nil {
 		return Intent{}, err
 	}
+	return buildIntent(symbol, plan, riskUSD)
+}
+
+// BuildPaperIntent applies identical sizing to every registered control market
+// without granting it funded execution authority.
+func BuildPaperIntent(symbol string, plan models.TradePlan, riskUSD float64) (Intent, error) {
+	if _, ok := universe.Find(symbol); !ok {
+		return Intent{}, fmt.Errorf("asset %s is not registered", symbol)
+	}
+	return buildIntent(symbol, plan, riskUSD)
+}
+
+func buildIntent(symbol string, plan models.TradePlan, riskUSD float64) (Intent, error) {
 	if !plan.Valid {
 		return Intent{}, fmt.Errorf("invalid plan: %s", plan.InvalidReason)
 	}
@@ -63,7 +80,7 @@ func BuildIntent(symbol string, plan models.TradePlan, riskUSD float64) (Intent,
 		return Intent{}, fmt.Errorf("invalid entry-stop distance")
 	}
 	created := time.Now().UTC()
-	return Intent{ID: fmt.Sprintf("%s-%s", plan.Date.Format("20060102"), symbol), CreatedAt: created, Symbol: symbol, Plan: plan, RiskUSD: riskUSD, Quantity: riskUSD / distance, State: Created}, nil
+	return Intent{ID: fmt.Sprintf("%s-%s", plan.Date.Format("20060102"), symbol), SchemaVersion: 1, CreatedAt: created, Symbol: symbol, Plan: plan, RiskUSD: riskUSD, Quantity: riskUSD / distance, State: Created}, nil
 }
 
 func ValidateBasket(intents []Intent, policy RiskPolicy) error {

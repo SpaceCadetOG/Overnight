@@ -16,8 +16,8 @@ func TestResearchAssetCannotCreateIntent(t *testing.T) {
 func TestBasketRisk(t *testing.T) {
 	plan := models.TradePlan{Date: time.Now(), Direction: models.BiasLong, Entry: 10, Stop: 9, TP1: 11, TP2: 12, Valid: true}
 	intents := []Intent{}
-	for _, symbol := range []string{"BTC", "ETH", "ZEC", "BNB", "SOL"} {
-		intent, err := BuildIntent(symbol, plan, 0.2)
+	for _, symbol := range []string{"BTC", "ETH"} {
+		intent, err := BuildIntent(symbol, plan, 0.5)
 		if err != nil {
 			t.Fatal(err)
 		}
