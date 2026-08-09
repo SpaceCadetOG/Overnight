@@ -154,6 +154,9 @@ func currentRecords(records []journal.TradeRecord, today time.Time, location *ti
 		if r.SessionDate.In(location).Format("2006-01-02") != today.Format("2006-01-02") {
 			continue
 		}
+		if r.Mode == "LIVE_EXECUTION" {
+			continue
+		}
 		if old, ok := latest[r.Symbol]; !ok || r.RecordedAt.After(old.RecordedAt) {
 			latest[r.Symbol] = r
 		}
@@ -169,18 +172,24 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	health, healthErr := readHealth(ctx)
 	records, recordsErr := store.ReadAll[journal.TradeRecord](root, "trade_journal")
 	latest := map[string]journal.TradeRecord{}
+	liveLatest := map[string]journal.TradeRecord{}
 	location, _ := time.LoadLocation("America/Chicago")
 	today := now.In(location)
 	for _, r := range records {
 		if r.SessionDate.In(location).Format("2006-01-02") != today.Format("2006-01-02") {
 			continue
 		}
-		if old, ok := latest[r.Symbol]; !ok || r.RecordedAt.After(old.RecordedAt) {
-			latest[r.Symbol] = r
+		target := latest
+		if r.Mode == "LIVE_EXECUTION" {
+			target = liveLatest
+		}
+		if old, ok := target[r.Symbol]; !ok || r.RecordedAt.After(old.RecordedAt) {
+			target[r.Symbol] = r
 		}
 	}
 	if recordsErr != nil {
 		latest = map[string]journal.TradeRecord{}
+		liveLatest = map[string]journal.TradeRecord{}
 	}
 	var totalR, realized, openPnL, riskCommitted float64
 	for _, r := range latest {
@@ -194,8 +203,8 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 		}
 	}
 	fmt.Print("\033[2J\033[H")
-	fmt.Printf("%s                                      %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT PAPER BOARD"), paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")))
-	divider("=", 104)
+	fmt.Printf("%s %s %s                         %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT TRADING BOARD"), paint(ansiBold+ansiBlue, "[PAPER]"), paint(ansiBold+ansiMagenta, "[LIVE]"), paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")))
+	divider("=", 112)
 	if accountErr != nil {
 		fmt.Printf("%s  %s\n", paint(ansiBold+ansiBlue, "LIGHTER ACCOUNT"), paint(ansiBold+ansiRed, "ERROR: "+accountErr.Error()))
 	} else {
@@ -228,13 +237,13 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	}
 	currentEquity := paperEquity + realized + openPnL
 	fmt.Printf("%s Start $%.2f  Equity %s  Realized %s  Open %s  Total %s  Risk $%.2f\n", paint(ansiBold+ansiBlue, "PAPER"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted)
-	divider("-", 104)
-	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-5s %-5s %-12s %12s %12s %12s %12s %8s %9s", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")))
-	divider("-", 104)
+	divider("-", 112)
+	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-7s %-5s %-5s %-12s %12s %12s %12s %12s %8s %9s", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")))
+	divider("-", 112)
 	for _, asset := range universe.All() {
 		r, ok := latest[asset.Symbol]
 		if !ok {
-			fmt.Printf("%s %s %s %12s %12s %12s %12s %8s %9s\n", coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell("—", 5, false, ansiDim), coloredCell("WAIT PLAN", 12, false, ansiYellow), "—", "—", "—", "—", "—", "—")
+			fmt.Printf("%s %s %s %s %12s %12s %12s %12s %8s %9s\n", modeCell("PAPER"), coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell("—", 5, false, ansiDim), coloredCell("WAIT PLAN", 12, false, ansiYellow), "—", "—", "—", "—", "—", "—")
 			continue
 		}
 		side := "LONG"
@@ -242,10 +251,36 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 			side = "SHORT"
 		}
 		pnl := r.RMultiple * (paperEquity * .005)
-		fmt.Printf("%s %s %s %12s %12s %12s %12s %s %s\n", coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(compactStatus(r.Outcome), 12, false, statusColor(r.Outcome)), price(r.Order.Price), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2), paint(signColor(r.RMultiple), fmt.Sprintf("%+7.2fR", r.RMultiple)), paint(signColor(pnl), fmt.Sprintf("%+8.2f", pnl)))
+		printTradeRow("PAPER", asset.Symbol, side, r, pnl)
 	}
-	divider("=", 104)
+	if len(liveLatest) > 0 {
+		divider("-", 112)
+		for _, asset := range universe.Live() {
+			r, ok := liveLatest[asset.Symbol]
+			if !ok {
+				continue
+			}
+			side := "LONG"
+			if r.Order.Side == "SELL" {
+				side = "SHORT"
+			}
+			printTradeRow("LIVE", asset.Symbol, side, r, r.RMultiple*(paperEquity*.005))
+		}
+	}
+	divider("=", 112)
 	fmt.Printf("%s | %s | %s %s\n", paint(ansiBold+ansiCyan, "12 PAPER SYSTEMS"), paint(ansiBold+ansiYellow, "FUNDED OFF"), paint(ansiBold+ansiBlue, "NEXT PLAN"), paint(ansiBold, nextPlan(now, location).Format("2006-01-02 15:04 UTC")))
+}
+
+func printTradeRow(mode, symbol, side string, r journal.TradeRecord, pnl float64) {
+	fmt.Printf("%s %s %s %s %12s %12s %12s %12s %s %s\n", modeCell(mode), coloredCell(symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(compactStatus(r.Outcome), 12, false, statusColor(r.Outcome)), price(r.Order.Price), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2), paint(signColor(r.RMultiple), fmt.Sprintf("%+7.2fR", r.RMultiple)), paint(signColor(pnl), fmt.Sprintf("%+8.2f", pnl)))
+}
+
+func modeCell(mode string) string {
+	color := ansiBold + ansiBlue
+	if mode == "LIVE" {
+		color = ansiBold + ansiMagenta
+	}
+	return coloredCell("["+mode+"]", 7, false, color)
 }
 
 func shouldColor(mode string) bool {
