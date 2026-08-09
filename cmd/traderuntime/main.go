@@ -361,6 +361,10 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 	if err != nil {
 		return err
 	}
+	liveRiskUSD, basketRiskUSD, err := execution.DefaultRiskLimits().Budget(accountEquity(account), len(universe.Live()))
+	if err != nil {
+		return fmt.Errorf("live risk budget: %w", err)
+	}
 	states, err := store.ReadAll[liveRuntimeState](a.root, "live_runtime_states")
 	if err != nil {
 		return err
@@ -371,7 +375,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		if !ok || snapshot.Plan == nil || !snapshot.Plan.Valid {
 			continue
 		}
-		intent, ok := intentFor(intents, asset.Symbol, snapshot.OpportunityID)
+		_, ok = intentFor(intents, asset.Symbol, snapshot.OpportunityID)
 		if !ok {
 			continue
 		}
@@ -394,7 +398,12 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 				side = "SELL"
 			}
 			expiry := time.Date(snapshot.SessionDate.Year(), snapshot.SessionDate.Month(), snapshot.SessionDate.Day(), 16, 0, 0, 0, a.location)
-			order := spec.Normalize(execution.Order{Symbol: asset.Symbol, Side: side, Price: snapshot.Plan.Entry, Quantity: intent.Quantity, Stop: snapshot.Plan.Stop, TP1: snapshot.Plan.TP1, TP2: snapshot.Plan.TP2, ExpiresAt: expiry.Unix()})
+			riskDistance := math.Abs(snapshot.Plan.Entry - snapshot.Plan.Stop)
+			if riskDistance <= 0 {
+				return fmt.Errorf("%s has invalid live risk distance", asset.Symbol)
+			}
+			liveQuantity := liveRiskUSD / riskDistance
+			order := spec.Normalize(execution.Order{Symbol: asset.Symbol, Side: side, Price: snapshot.Plan.Entry, Quantity: liveQuantity, Stop: snapshot.Plan.Stop, TP1: snapshot.Plan.TP1, TP2: snapshot.Plan.TP2, ExpiresAt: expiry.Unix()})
 			if e = spec.Validate(order); e != nil {
 				return e
 			}
@@ -405,7 +414,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e = managed.SetStrategyOrderID(ids.StrategyOrderID); e != nil {
 				return e
 			}
-			response, e := a.liveExecutor.Submit(execution.OrderRequest{Symbol: asset.Symbol, Side: side, Price: order.Price, Size: order.Quantity, ExpiresAt: expiry, OrderType: lightertx.LimitOrder, ClientOrderIndex: managed.EntryOrderIndex, RiskUSD: intent.RiskUSD, RiskLimitUSD: live.DefaultRiskPolicy().RiskPerAssetUSD})
+			response, e := a.liveExecutor.Submit(execution.OrderRequest{Symbol: asset.Symbol, Side: side, Price: order.Price, Size: order.Quantity, ExpiresAt: expiry, OrderType: lightertx.LimitOrder, ClientOrderIndex: managed.EntryOrderIndex, RiskUSD: liveRiskUSD, RiskLimitUSD: liveRiskUSD})
 			if e != nil {
 				return e
 			}
@@ -420,7 +429,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 				return e
 			}
 			fmt.Printf("%-5s LIVE ENTRY SUBMITTED qty=%.8f tx=%s\n", asset.Symbol, order.Quantity, response.OrderID)
-			a.notifier.BestEffort("LIVE Order Submitted", fmt.Sprintf("%s %s\nEntry: %.8f\nQuantity: %.8f", asset.Symbol, side, order.Price, order.Quantity), "high", "rotating_light")
+			a.notifier.BestEffort("LIVE Order Submitted", fmt.Sprintf("%s %s\nEntry: %.8f\nQuantity: %.8f\nRisk: $%.4f\nBasket limit: $%.4f", asset.Symbol, side, order.Price, order.Quantity, liveRiskUSD, basketRiskUSD), "high", "rotating_light")
 			continue
 		}
 		if state.Managed == nil || state.Managed.State == execution.ProtectionClosed {
@@ -460,6 +469,16 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		}
 	}
 	return nil
+}
+
+func accountEquity(snapshot lighterexec.Snapshot) float64 {
+	for _, key := range []string{"total_asset_value", "collateral"} {
+		value, err := strconv.ParseFloat(fmt.Sprint(snapshot.Account[key]), 64)
+		if err == nil && value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func (a *app) hourlyNotice(now time.Time) {

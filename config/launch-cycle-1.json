@@ -57,8 +57,9 @@
   "liquidation_windows": ["-5s:+5s", "-30s:+30s", "-5m:+5m"],
   "confirmed_liquidation_source": "lighter_public_trade_liquidation",
   "inferred_liquidation_source": "order_flow_inference_v1",
-  "activation_state": "FROZEN_FOR_LOCAL_SOAK",
-  "funded_scheduler_enabled": false,
+  "activation_state": "AUTHORIZED_FOR_30_DAY_LIVE",
+  "funded_scheduler_enabled": true,
+  "funded_execution_scope": ["BTC", "ETH"],
   "activation_requires": [
     "overnight_12_market_soak_pass",
     "morning_data_coverage_report_pass",
