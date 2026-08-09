@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,5 +30,26 @@ func TestNtfyMessageContract(t *testing.T) {
 func TestDisabledNtfyIsNoop(t *testing.T) {
 	if err := (&Client{}).Send(context.Background(), "x", "y", "", ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTelegramMessageContract(t *testing.T) {
+	var payload map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("content type=%q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	c := NewTelegram(server.URL, "12345", server.Client())
+	if err := c.Send(context.Background(), "Overnight EOD PASS", "Result: +1.00R", "default", "bar_chart"); err != nil {
+		t.Fatal(err)
+	}
+	if payload["chat_id"] != "12345" || payload["text"] != "Overnight EOD PASS\nResult: +1.00R" {
+		t.Fatalf("unexpected payload: %#v", payload)
 	}
 }

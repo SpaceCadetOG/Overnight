@@ -144,7 +144,7 @@ func main() {
 	report := journal.BuildDaily(journals, date, len(universe.All()))
 	notifier := notify.FromEnvironment()
 	if !notifier.Enabled() {
-		fmt.Fprintln(os.Stderr, "EOD notification not sent: NTFY_URL and NTFY_TOPIC are not configured")
+		fmt.Fprintln(os.Stderr, "EOD notification not sent: ntfy and Telegram are not configured")
 	} else if err := notifier.Send(context.Background(), "Overnight EOD "+status, eodMessage(report, status, len(q.Issues)), map[bool]string{true: "default", false: "urgent"}[q.Passed], "clipboard,bar_chart"); err != nil {
 		fmt.Fprintf(os.Stderr, "EOD notification delivery failed: %v\n", err)
 	}
