@@ -2,14 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +35,11 @@ type collectorHealth struct {
 	BooksReady            int       `json:"books_ready"`
 }
 
+type recorderMark struct {
+	Price float64
+	At    time.Time
+}
+
 const (
 	ansiReset   = "\033[0m"
 	ansiBold    = "\033[1m"
@@ -45,9 +53,12 @@ const (
 )
 
 var colorEnabled bool
+var cachedAccount lighterexec.Snapshot
+var cachedAccountAt time.Time
 
 func main() {
 	root := flag.String("store", "data/test-run", "paper test-run store")
+	marketDataRoot := flag.String("market-data-root", "data/live/lighter", "local Lighter recorder root")
 	refresh := flag.Duration("refresh", 10*time.Second, "screen refresh interval")
 	paperEquity := flag.Float64("paper-equity", 100, "paper account starting equity")
 	view := flag.String("view", "compact", "compact or detailed")
@@ -63,9 +74,9 @@ func main() {
 	client, markets, err := accountClient()
 	for {
 		if strings.EqualFold(*view, "detailed") {
-			detailedScreen(*root, *paperEquity, client, markets, err)
+			detailedScreen(*root, *marketDataRoot, *paperEquity, client, markets, err)
 		} else {
-			screen(*root, *paperEquity, client, markets, err)
+			screen(*root, *marketDataRoot, *paperEquity, client, markets, err)
 		}
 		if *once {
 			return
@@ -74,19 +85,13 @@ func main() {
 	}
 }
 
-func detailedScreen(root string, paperEquity float64, client *lighterexec.Client, accountMarkets []lighterexec.Market, accountInitErr error) {
+func detailedScreen(root, marketDataRoot string, paperEquity float64, client *lighterexec.Client, accountMarkets []lighterexec.Market, accountInitErr error) {
 	now := time.Now().UTC()
 	location, _ := time.LoadLocation("America/Chicago")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	account, accountErr := readAccountSnapshot(ctx, client, accountMarkets, accountInitErr)
-	publicMarkets, marketErr := lighterexec.CheckPublic(ctx, os.Getenv("LIGHTER_BASE_URL"))
-	marks := map[string]float64{}
-	if marketErr == nil {
-		for _, market := range publicMarkets {
-			marks[market.Symbol] = number(market.MarkPrice)
-		}
-	}
+	marks := readRecorderMarks(marketDataRoot, now, location)
 	records, _ := store.ReadAll[journal.TradeRecord](root, "trade_journal")
 	latest := currentRecords(records, now.In(location), location)
 	overlayPaperRuntime(root, latest, now.In(location), location)
@@ -95,19 +100,23 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 	for _, r := range latest {
 		risk := paperEquity * .005
 		riskCommitted += risk
-		totalR += r.RMultiple
-		switch r.Outcome {
+		resultR := r.RMultiple
+		if activeTrade(r) {
+			resultR, _, _, _ = paperMarkToMarket(r, markForRecord(marks, r).Price, risk)
+		}
+		totalR += resultR
+		switch displayStatus(r) {
 		case "NO_FILL":
 			noFill++
-		case "OPEN", "TP1_OPEN":
+		case "OPEN", "FILLED", "TP1/RUN":
 			open++
-			openPnL += r.RMultiple * risk
+			openPnL += resultR * risk
 		default:
 			filled++
-			realized += r.RMultiple * risk
-			if r.RMultiple > 0 {
+			realized += resultR * risk
+			if resultR > 0 {
 				wins++
-			} else if r.RMultiple < 0 {
+			} else if resultR < 0 {
 				losses++
 			}
 		}
@@ -124,7 +133,7 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 	} else {
 		fmt.Printf("%s %s\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
 	}
-	printActiveTrades(latest, nil)
+	printActiveTrades(latest, nil, account.Positions, marks, paperEquity, accountErr == nil)
 	detailedDivider("-")
 	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("| %-3s | %-5s | %-5s | %-12s | %9s | %9s | %9s | %9s | %9s |", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "MARK", "STOP", "TP1", "TP2")))
 	detailedDivider("-")
@@ -139,7 +148,7 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 		if r.Order.Side == "SELL" {
 			side = "SHORT"
 		}
-		mark := marks[asset.MarketSymbol()]
+		mark := marks[asset.MarketSymbol()].Price
 		risk := paperEquity * .005
 		printDetailedRow("PAPER", asset.Symbol, side, displayStatus(r), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
 		detail := fmt.Sprintf("|     |       | %s | %s | Result %s / %s", paint(ansiDim, fmt.Sprintf("Qty %.6f", r.Order.Quantity)), paint(ansiYellow, fmt.Sprintf("Risk $%.2f", risk)), signedR(r.RMultiple), signedMoney(r.RMultiple*risk))
@@ -202,7 +211,7 @@ func currentRecords(records []journal.TradeRecord, today time.Time, location *ti
 	return latest
 }
 
-func screen(root string, paperEquity float64, client *lighterexec.Client, markets []lighterexec.Market, accountInitErr error) {
+func screen(root, marketDataRoot string, paperEquity float64, client *lighterexec.Client, markets []lighterexec.Market, accountInitErr error) {
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -213,6 +222,7 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	liveLatest := map[string]journal.TradeRecord{}
 	location, _ := time.LoadLocation("America/Chicago")
 	today := now.In(location)
+	marks := readRecorderMarks(marketDataRoot, now, location)
 	for _, r := range records {
 		if r.SessionDate.In(location).Format("2006-01-02") != today.Format("2006-01-02") {
 			continue
@@ -234,11 +244,15 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	for _, r := range latest {
 		risk := paperEquity * .005
 		riskCommitted += risk
-		totalR += r.RMultiple
-		if r.Outcome == "OPEN" || r.Outcome == "TP1_OPEN" {
-			openPnL += r.RMultiple * risk
+		resultR := r.RMultiple
+		if activeTrade(r) {
+			resultR, _, _, _ = paperMarkToMarket(r, markForRecord(marks, r).Price, risk)
+		}
+		totalR += resultR
+		if activeTrade(r) {
+			openPnL += resultR * risk
 		} else {
-			realized += r.RMultiple * risk
+			realized += resultR * risk
 		}
 	}
 	fmt.Print("\033[2J\033[H")
@@ -276,7 +290,7 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	}
 	currentEquity := paperEquity + realized + openPnL
 	fmt.Printf("%s Start $%.2f  Equity %s  Realized %s  Open %s  Total %s  Risk $%.2f\n", paint(ansiBold+ansiBlue, "PAPER"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted)
-	printActiveTrades(latest, liveLatest)
+	printActiveTrades(latest, liveLatest, snapshot.Positions, marks, paperEquity, accountErr == nil)
 	divider("-", 112)
 	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-7s %-5s %-5s %-12s %12s %12s %12s %12s %8s %9s", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")))
 	divider("-", 112)
@@ -309,6 +323,14 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	}
 	divider("=", 112)
 	fmt.Printf("%s | %s | %s %s\n", paint(ansiBold+ansiCyan, "12 PAPER SYSTEMS"), paint(ansiBold+ansiYellow, "FUNDED OFF"), paint(ansiBold+ansiBlue, "NEXT PLAN"), paint(ansiBold, nextPlan(now, location).Format("2006-01-02 15:04 UTC")))
+}
+
+func markForRecord(marks map[string]recorderMark, record journal.TradeRecord) recorderMark {
+	symbol := record.ExchangeSymbol
+	if symbol == "" {
+		symbol = record.Symbol
+	}
+	return marks[symbol]
 }
 
 func printTradeRow(mode, symbol, side string, r journal.TradeRecord, pnl float64) {
@@ -368,35 +390,164 @@ func activeTrade(r journal.TradeRecord) bool {
 	return r.State == execution.PaperFilled || r.State == execution.PaperTP1 || r.Outcome == "OPEN" || r.Outcome == "TP1_OPEN"
 }
 
-func printActiveTrades(paper, liveRecords map[string]journal.TradeRecord) {
-	type row struct {
-		mode, symbol, side, status string
-		r                          float64
-	}
-	rows := []row{}
-	collect := func(mode string, records map[string]journal.TradeRecord) {
-		for _, asset := range universe.All() {
-			r, ok := records[asset.Symbol]
-			if !ok || !activeTrade(r) {
-				continue
-			}
-			side := "LONG"
-			if r.Order.Side == "SELL" {
-				side = "SHORT"
-			}
-			rows = append(rows, row{mode, asset.Symbol, side, displayStatus(r), r.RMultiple})
+func printActiveTrades(paper, liveRecords map[string]journal.TradeRecord, positions []map[string]any, marks map[string]recorderMark, paperEquity float64, accountFresh bool) {
+	count := 0
+	for _, record := range paper {
+		if activeTrade(record) {
+			count++
 		}
 	}
-	collect("PAPER", paper)
-	collect("LIVE", liveRecords)
-	if len(rows) == 0 {
+	for _, position := range positions {
+		if value(position, "position", "size") != 0 {
+			count++
+		}
+	}
+	if count == 0 {
 		fmt.Printf("%s %s\n", paint(ansiBold+ansiBlue, "ACTIVE TRADES"), paint(ansiDim, "NONE"))
 		return
 	}
-	fmt.Printf("%s %d\n", paint(ansiBold+ansiBlue, "ACTIVE TRADES"), len(rows))
-	for _, item := range rows {
-		fmt.Printf("  %s %s %s %s  Result %s\n", modeCell(item.mode), coloredCell(item.symbol, 5, false, ansiBold+ansiCyan), coloredCell(item.side, 5, false, sideColor(item.side)), paint(statusColor(item.status), item.status), signedR(item.r))
+	fmt.Printf("%s %d %s\n", paint(ansiBold+ansiBlue, "ACTIVE TRADES"), count, paint(ansiDim, "(real-time local marks)"))
+	for _, asset := range universe.All() {
+		record, ok := paper[asset.Symbol]
+		if !ok || !activeTrade(record) {
+			continue
+		}
+		side := "LONG"
+		if record.Order.Side == "SELL" {
+			side = "SHORT"
+		}
+		quote := marks[asset.MarketSymbol()]
+		liveR, livePnL, remaining, next := paperMarkToMarket(record, quote.Price, paperEquity*.005)
+		fmt.Printf("  %s %s %s %s  Qty %.6f  Rem %d%%\n", modeCell("PAPER"), coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), paint(statusColor(displayStatus(record)), displayStatus(record)), record.Order.Quantity*float64(remaining)/100, remaining)
+		fmt.Printf("          Entry %s  Mark %s%s  Live %s / %s  Next %s\n", price(record.Order.Price), price(quote.Price), markFreshness(quote), signedR(liveR), signedMoney(livePnL), paint(ansiYellow, next))
 	}
+	for _, position := range positions {
+		size := value(position, "position", "size")
+		if size == 0 {
+			continue
+		}
+		symbol := fmt.Sprint(position["symbol"])
+		side := "LONG"
+		if size < 0 {
+			side = "SHORT"
+		}
+		entry := value(position, "avg_entry_price", "entry_price")
+		upnl := value(position, "unrealized_pnl", "unrealized_pnl_usdc", "unrealized_profit")
+		quote := marks[symbol]
+		status := "LIVE POSITION"
+		if record, ok := liveRecords[symbol]; ok {
+			status = displayStatus(record)
+		}
+		fmt.Printf("  %s %s %s %s  Qty %.8f\n", modeCell("LIVE"), coloredCell(symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), paint(ansiBold+ansiMagenta, status), math.Abs(size))
+		accountTag, accountColor := "[ACCOUNT LIVE]", ansiBold+ansiGreen
+		if !accountFresh {
+			accountTag, accountColor = "[ACCOUNT STALE]", ansiBold+ansiYellow
+		}
+		fmt.Printf("          Avg fill %s  Mark %s%s  uPnL %s  %s %s\n", price(entry), price(quote.Price), markFreshness(quote), signedMoney(upnl), paint(ansiBold+ansiRed, "EXCHANGE POSITION"), paint(accountColor, accountTag))
+	}
+}
+
+func paperMarkToMarket(record journal.TradeRecord, mark, riskUSD float64) (float64, float64, int, string) {
+	if mark <= 0 {
+		return record.RMultiple, record.RMultiple * riskUSD, map[bool]int{true: 50, false: 100}[record.TP1Hit], "MARK UNAVAILABLE"
+	}
+	risk := math.Abs(record.Order.Price - record.Order.Stop)
+	if risk == 0 {
+		return 0, 0, 100, "INVALID RISK"
+	}
+	runnerR := (mark - record.Order.Price) / risk
+	if record.Order.Side == "SELL" {
+		runnerR = -runnerR
+	}
+	remaining, next, totalR := 100, "TP1 OR STOP", runnerR
+	if record.State == execution.PaperTP1 || record.TP1Hit {
+		remaining, next = 50, "TP2 OR BREAKEVEN"
+		tp1R := math.Abs(record.Order.TP1-record.Order.Price) / risk
+		totalR = .5*tp1R + .5*runnerR
+	}
+	return totalR, totalR * riskUSD, remaining, next
+}
+
+func markFreshness(mark recorderMark) string {
+	if mark.Price <= 0 {
+		return paint(ansiBold+ansiRed, " [NO MARK]")
+	}
+	if mark.At.IsZero() || time.Since(mark.At) > 30*time.Second {
+		return paint(ansiBold+ansiYellow, " [STALE]")
+	}
+	return paint(ansiBold+ansiGreen, " [LIVE]")
+}
+
+func readRecorderMarks(root string, now time.Time, location *time.Location) map[string]recorderMark {
+	marks := map[string]recorderMark{}
+	day := "date=" + now.In(location).Format("2006-01-02")
+	for _, asset := range universe.All() {
+		line, err := lastJSONLine(filepath.Join(root, day, "asset="+asset.MarketSymbol(), "ticker_events.jsonl"))
+		if err != nil {
+			continue
+		}
+		var record struct {
+			ReceivedAt time.Time `json:"received_at"`
+			Event      struct {
+				Ticker struct {
+					Ask struct {
+						Price string `json:"price"`
+					} `json:"a"`
+					Bid struct {
+						Price string `json:"price"`
+					} `json:"b"`
+				} `json:"ticker"`
+			} `json:"event"`
+		}
+		if json.Unmarshal(line, &record) != nil {
+			continue
+		}
+		ask, _ := strconv.ParseFloat(record.Event.Ticker.Ask.Price, 64)
+		bid, _ := strconv.ParseFloat(record.Event.Ticker.Bid.Price, 64)
+		mark := 0.0
+		if ask > 0 && bid > 0 {
+			mark = (ask + bid) / 2
+		} else if ask > 0 {
+			mark = ask
+		} else {
+			mark = bid
+		}
+		marks[asset.MarketSymbol()] = recorderMark{Price: mark, At: record.ReceivedAt}
+	}
+	return marks
+}
+
+func lastJSONLine(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	const window int64 = 64 * 1024
+	start := info.Size() - window
+	if start < 0 {
+		start = 0
+	}
+	if _, err = file.Seek(start, 0); err != nil {
+		return nil, err
+	}
+	buffer, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	complete := len(buffer) > 0 && buffer[len(buffer)-1] == '\n'
+	lines := bytes.Split(bytes.TrimSpace(buffer), []byte("\n"))
+	if !complete && len(lines) > 1 {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("empty ticker stream")
+	}
+	return lines[len(lines)-1], nil
 }
 
 func modeCell(mode string) string {
@@ -565,12 +716,23 @@ func accountClient() (*lighterexec.Client, []lighterexec.Market, error) {
 
 func readAccountSnapshot(ctx context.Context, client *lighterexec.Client, markets []lighterexec.Market, initErr error) (lighterexec.Snapshot, error) {
 	if initErr != nil {
+		if !cachedAccountAt.IsZero() {
+			return cachedAccount, initErr
+		}
 		return lighterexec.Snapshot{}, initErr
 	}
 	if client == nil {
 		return lighterexec.Snapshot{}, fmt.Errorf("live account unavailable")
 	}
-	return client.ReadSnapshot(ctx, markets)
+	snapshot, err := client.ReadSnapshot(ctx, markets)
+	if err != nil {
+		if !cachedAccountAt.IsZero() {
+			return cachedAccount, err
+		}
+		return lighterexec.Snapshot{}, err
+	}
+	cachedAccount, cachedAccountAt = snapshot, time.Now().UTC()
+	return snapshot, nil
 }
 
 func readHealth(ctx context.Context) (collectorHealth, error) {

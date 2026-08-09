@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,5 +53,31 @@ func TestRuntimeStateOverlaysIncompleteJournal(t *testing.T) {
 	overlayPaperRuntime(root, records, session, location)
 	if records["BTC"].State != execution.PaperFilled || displayStatus(records["BTC"]) != "OPEN" || !activeTrade(records["BTC"]) {
 		t.Fatalf("runtime state not reflected: %#v", records["BTC"])
+	}
+}
+
+func TestPaperMarkToMarketTracksRunner(t *testing.T) {
+	record := journal.TradeRecord{State: execution.PaperTP1, TP1Hit: true, Order: execution.Order{Side: "BUY", Price: 100, Stop: 99, TP1: 101, TP2: 103}}
+	r, pnl, remaining, next := paperMarkToMarket(record, 101.5, .50)
+	if r != 1.25 || pnl != .625 || remaining != 50 || next != "TP2 OR BREAKEVEN" {
+		t.Fatalf("r=%v pnl=%v remaining=%v next=%q", r, pnl, remaining, next)
+	}
+}
+
+func TestReadRecorderMarksUsesLastTicker(t *testing.T) {
+	root := t.TempDir()
+	location, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	dir := filepath.Join(root, "date="+now.In(location).Format("2006-01-02"), "asset=BTC")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	data := "{\"received_at\":\"2026-08-09T11:59:59Z\",\"event\":{\"ticker\":{\"a\":{\"price\":\"101\"},\"b\":{\"price\":\"99\"}}}}\n{\"partial\":"
+	if err := os.WriteFile(filepath.Join(dir, "ticker_events.jsonl"), []byte(data), 0640); err != nil {
+		t.Fatal(err)
+	}
+	marks := readRecorderMarks(root, now, location)
+	if marks["BTC"].Price != 100 {
+		t.Fatalf("mark=%v", marks["BTC"].Price)
 	}
 }
