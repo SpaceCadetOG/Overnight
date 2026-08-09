@@ -113,22 +113,23 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 	fmt.Print("\033[2J\033[H")
 	fmt.Printf("%s %s %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT STRATEGY — CONTROL ROOM"), paint(ansiBold+ansiBlue, "[PAPER]"), paint(ansiBold+ansiMagenta, "[LIVE]"))
 	fmt.Printf("%s / %s\n", paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")), paint(ansiDim+ansiCyan, now.In(location).Format("15:04:05 CT")))
-	divider("=", 106)
+	detailedDivider("=")
 	currentEquity := paperEquity + realized + openPnL
-	fmt.Printf("%s  Start $%.2f | Equity %s | Realized %s | Unrealized %s | Result %s | Risk $%.2f | %s\n", paint(ansiBold+ansiBlue, "PAPER ACCOUNT"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted, paint(ansiBold+ansiYellow, "FUNDED OFF"))
+	fmt.Printf("%s  Start $%.2f | Equity %s | Realized %s | Unrealized %s\n", paint(ansiBold+ansiBlue, "PAPER ACCOUNT"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL))
+	fmt.Printf("%s Result %s | Risk $%.2f | %s\n", strings.Repeat(" ", 15), signedR(totalR), riskCommitted, paint(ansiBold+ansiYellow, "FUNDED OFF"))
 	if accountErr == nil {
 		fmt.Printf("%s Balance $%.2f | Available $%.2f | Margin $%.2f | Positions %d | Orders %d\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), value(account.Account, "collateral"), value(account.Account, "available_balance"), max0(value(account.Account, "collateral")-value(account.Account, "available_balance")), openPositions(account.Positions), len(account.Orders))
 	} else {
-		fmt.Printf("%s %s\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), paint(ansiBold+ansiRed, "ERROR: "+accountErr.Error()))
+		fmt.Printf("%s %s\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
 	}
-	divider("-", 106)
-	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-7s %-5s %-5s %-13s %12s %12s %12s %12s %12s", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "MARK", "STOP", "TP1", "TP2")))
-	divider("-", 106)
+	detailedDivider("-")
+	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("| %-3s | %-5s | %-5s | %-12s | %9s | %9s | %9s | %9s | %9s |", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "MARK", "STOP", "TP1", "TP2")))
+	detailedDivider("-")
 	for _, asset := range universe.All() {
 		r, ok := latest[asset.Symbol]
 		if !ok {
 			waiting++
-			fmt.Printf("%s %s %s %s\n", modeCell("PAPER"), coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell("—", 5, false, ansiDim), coloredCell("WAIT PLAN", 13, false, ansiYellow))
+			printDetailedRow("PAPER", asset.Symbol, "—", "WAIT PLAN", "—", "—", "—", "—", "—")
 			continue
 		}
 		side := "LONG"
@@ -137,18 +138,38 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 		}
 		mark := marks[asset.MarketSymbol()]
 		risk := paperEquity * .005
-		fmt.Printf("%s %s %s %s %12s %12s %12s %12s %12s\n", modeCell("PAPER"), coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(compactStatus(r.Outcome), 13, false, statusColor(r.Outcome)), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
-		detail := fmt.Sprintf("        %s | %s | Result %s / %s | MFE %s | MAE %s", paint(ansiDim, fmt.Sprintf("Qty %.6f", r.Order.Quantity)), paint(ansiYellow, fmt.Sprintf("Risk $%.2f", risk)), signedR(r.RMultiple), signedMoney(r.RMultiple*risk), excursion(r.MFER, true), excursion(r.MAER, false))
+		printDetailedRow("PAPER", asset.Symbol, side, compactStatus(r.Outcome), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
+		detail := fmt.Sprintf("|     |       | %s | %s | Result %s / %s", paint(ansiDim, fmt.Sprintf("Qty %.6f", r.Order.Quantity)), paint(ansiYellow, fmt.Sprintf("Risk $%.2f", risk)), signedR(r.RMultiple), signedMoney(r.RMultiple*risk))
+		excursions := fmt.Sprintf("|     |       | MFE %s | MAE %s", excursion(r.MFER, true), excursion(r.MAER, false))
 		if r.Outcome == "NO_FILL" && mark > 0 {
-			detail += paint(ansiYellow, fmt.Sprintf(" | Entry distance %.1fbps", math.Abs(mark-r.Order.Price)/r.Order.Price*10000))
+			excursions += paint(ansiYellow, fmt.Sprintf(" | Entry distance %.1fbps", math.Abs(mark-r.Order.Price)/r.Order.Price*10000))
 		}
 		if r.ActualFill > 0 {
-			detail += paint(ansiCyan, fmt.Sprintf(" | Fill %s | Slip %.2fbps", price(r.ActualFill), r.EntrySlippageBPS))
+			excursions += paint(ansiCyan, fmt.Sprintf(" | Fill %s | Slip %.2fbps", price(r.ActualFill), r.EntrySlippageBPS))
 		}
 		fmt.Println(detail)
+		fmt.Println(excursions)
 	}
-	divider("=", 106)
+	detailedDivider("=")
 	fmt.Printf("%s %d | %s %d | %s %d | %s %d | %s %d | %s %d | %s\n", paint(ansiBold+ansiCyan, "FILLED"), filled, paint(ansiYellow, "WAITING"), waiting, paint(ansiYellow, "NO FILL"), noFill, paint(ansiBold+ansiGreen, "WINS"), wins, paint(ansiBold+ansiRed, "LOSSES"), losses, paint(ansiBold+ansiCyan, "OPEN"), open, paint(ansiDim+ansiMagenta, "ML SNAPSHOT: SHADOW ONLY"))
+}
+
+func detailedDivider(char string) {
+	// Matches the exact printable width of the detailed table below.
+	fmt.Println(paint(ansiDim+ansiBlue, "+"+strings.Repeat(char, 5)+"+"+strings.Repeat(char, 7)+"+"+strings.Repeat(char, 7)+"+"+strings.Repeat(char, 14)+"+"+strings.Repeat(char, 11)+"+"+strings.Repeat(char, 11)+"+"+strings.Repeat(char, 11)+"+"+strings.Repeat(char, 11)+"+"+strings.Repeat(char, 11)+"+"))
+}
+
+func printDetailedRow(mode, symbol, side, status, entry, mark, stop, tp1, tp2 string) {
+	modeColor := ansiBold + ansiBlue
+	modeTag := "[P]"
+	if mode == "LIVE" {
+		modeColor, modeTag = ansiBold+ansiMagenta, "[L]"
+	}
+	sColor := sideColor(side)
+	if side == "—" {
+		sColor = ansiDim
+	}
+	fmt.Printf("| %s | %s | %s | %s | %9s | %9s | %9s | %9s | %9s |\n", coloredCell(modeTag, 3, false, modeColor), coloredCell(symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sColor), coloredCell(status, 12, false, statusColor(status)), entry, mark, stop, tp1, tp2)
 }
 
 func excursion(value float64, favorable bool) string {
@@ -220,7 +241,7 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	fmt.Printf("%s %s %s                         %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT TRADING BOARD"), paint(ansiBold+ansiBlue, "[PAPER]"), paint(ansiBold+ansiMagenta, "[LIVE]"), paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")))
 	divider("=", 112)
 	if accountErr != nil {
-		fmt.Printf("%s  %s\n", paint(ansiBold+ansiBlue, "LIGHTER ACCOUNT"), paint(ansiBold+ansiRed, "ERROR: "+accountErr.Error()))
+		fmt.Printf("%s  %s\n", paint(ansiBold+ansiBlue, "LIGHTER ACCOUNT"), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
 	} else {
 		balance := value(snapshot.Account, "collateral", "total_asset_value")
 		available := value(snapshot.Account, "available_balance")
@@ -233,7 +254,7 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 		fmt.Printf("%s  Bal $%.2f  Eq %s  Avail $%.2f  Margin $%.2f  uPnL %s  Pos %d  Orders %d  %s\n", paint(ansiBold+ansiBlue, "LIVE"), balance, signedMoney(equity), available, used, signedMoney(upnl), openPositions(snapshot.Positions), len(snapshot.Orders), paint(ansiDim+ansiCyan, "[READ ONLY]"))
 	}
 	if healthErr != nil {
-		fmt.Printf("%s      %s\n", paint(ansiBold+ansiBlue, "MARKET DATA"), paint(ansiBold+ansiRed, "ERROR: "+healthErr.Error()))
+		fmt.Printf("%s      %s\n", paint(ansiBold+ansiBlue, "MARKET DATA"), paint(ansiBold+ansiRed, "ERROR: "+shortError(healthErr)))
 	} else {
 		connected := paint(ansiBold+ansiRed, "false")
 		if health.Connected {
@@ -308,6 +329,27 @@ func shouldColor(mode string) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0 && !strings.EqualFold(os.Getenv("TERM"), "dumb")
 }
 
+func shortError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	if strings.Contains(message, "LIGHTER_ACCOUNT_INDEX") {
+		return "LIGHTER_ACCOUNT_INDEX is not configured"
+	}
+	if strings.Contains(message, "LIGHTER_API_KEY_INDEX") {
+		return "LIGHTER_API_KEY_INDEX is not configured"
+	}
+	if strings.Contains(message, "dial tcp") || strings.Contains(message, "connection refused") {
+		return "connection unavailable - see service logs"
+	}
+	const limit = 68
+	if len(message) > limit {
+		return message[:limit-3] + "..."
+	}
+	return message
+}
+
 func paint(code, value string) string {
 	if !colorEnabled || code == "" {
 		return value
@@ -346,11 +388,11 @@ func statusColor(status string) string {
 		return ansiBold + ansiGreen
 	case "STOPPED":
 		return ansiBold + ansiRed
-	case "TP1_THEN_BE", "TP1_THEN_STOP", "TP1_OPEN":
+	case "TP1_THEN_BE", "TP1_THEN_STOP", "TP1_OPEN", "TP1→BE", "TP1/RUN":
 		return ansiBold + ansiYellow
 	case "OPEN", "FILLED":
 		return ansiBold + ansiCyan
-	case "NO_FILL", "WAITING_FOR_FILL":
+	case "NO_FILL", "WAITING_FOR_FILL", "WAIT PLAN":
 		return ansiYellow
 	default:
 		return ""
