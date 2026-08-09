@@ -157,6 +157,11 @@ during the paper dress rehearsal. Changing that protected TradePi environment
 value and restarting `traderuntime.service` is the explicit funded activation
 action.
 
+Runtime, recorder, and EOD notifications reuse the existing ntfy variables
+`NTFY_URL` and `NTFY_TOPIC`. Services load both `/etc/overnight.env` and
+`/etc/overnight-strategy.env`; when both exist, the strategy-specific file has
+precedence.
+
 ## Production connectivity gate
 
 The executor must not start funded execution unless `lighterexecutor -check`
