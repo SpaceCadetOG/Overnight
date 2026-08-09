@@ -111,21 +111,24 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 		}
 	}
 	fmt.Print("\033[2J\033[H")
-	fmt.Println("OVERNIGHT STRATEGY — PAPER CONTROL ROOM")
-	fmt.Printf("%s / %s\n", now.Format("2006-01-02 15:04:05 UTC"), now.In(location).Format("15:04:05 CT"))
-	fmt.Println(strings.Repeat("=", 96))
-	fmt.Printf("PAPER ACCOUNT  Start $%.2f | Equity $%.2f | Realized %+.2f | Unrealized %+.2f | Result %+.2fR | Risk $%.2f | FUNDED OFF\n", paperEquity, paperEquity+realized+openPnL, realized, openPnL, totalR, riskCommitted)
+	fmt.Printf("%s %s %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT STRATEGY — CONTROL ROOM"), paint(ansiBold+ansiBlue, "[PAPER]"), paint(ansiBold+ansiMagenta, "[LIVE]"))
+	fmt.Printf("%s / %s\n", paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")), paint(ansiDim+ansiCyan, now.In(location).Format("15:04:05 CT")))
+	divider("=", 106)
+	currentEquity := paperEquity + realized + openPnL
+	fmt.Printf("%s  Start $%.2f | Equity %s | Realized %s | Unrealized %s | Result %s | Risk $%.2f | %s\n", paint(ansiBold+ansiBlue, "PAPER ACCOUNT"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted, paint(ansiBold+ansiYellow, "FUNDED OFF"))
 	if accountErr == nil {
-		fmt.Printf("LIVE READ-ONLY Balance $%.2f | Available $%.2f | Margin $%.2f | Positions %d | Orders %d\n", value(account.Account, "collateral"), value(account.Account, "available_balance"), max0(value(account.Account, "collateral")-value(account.Account, "available_balance")), openPositions(account.Positions), len(account.Orders))
+		fmt.Printf("%s Balance $%.2f | Available $%.2f | Margin $%.2f | Positions %d | Orders %d\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), value(account.Account, "collateral"), value(account.Account, "available_balance"), max0(value(account.Account, "collateral")-value(account.Account, "available_balance")), openPositions(account.Positions), len(account.Orders))
+	} else {
+		fmt.Printf("%s %s\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), paint(ansiBold+ansiRed, "ERROR: "+accountErr.Error()))
 	}
-	fmt.Println(strings.Repeat("-", 96))
-	fmt.Printf("%-5s %-5s %-13s %12s %12s %12s %12s %12s\n", "ASSET", "SIDE", "STATUS", "ENTRY", "MARK", "STOP", "TP1", "TP2")
-	fmt.Println(strings.Repeat("-", 96))
+	divider("-", 106)
+	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-7s %-5s %-5s %-13s %12s %12s %12s %12s %12s", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "MARK", "STOP", "TP1", "TP2")))
+	divider("-", 106)
 	for _, asset := range universe.All() {
 		r, ok := latest[asset.Symbol]
 		if !ok {
 			waiting++
-			fmt.Printf("%-5s %-5s %-13s\n", asset.Symbol, "—", "WAIT PLAN")
+			fmt.Printf("%s %s %s %s\n", modeCell("PAPER"), coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell("—", 5, false, ansiDim), coloredCell("WAIT PLAN", 13, false, ansiYellow))
 			continue
 		}
 		side := "LONG"
@@ -134,18 +137,29 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 		}
 		mark := marks[asset.MarketSymbol()]
 		risk := paperEquity * .005
-		fmt.Printf("%-5s %-5s %-13s %12s %12s %12s %12s %12s\n", asset.Symbol, side, compactStatus(r.Outcome), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
-		detail := fmt.Sprintf("      Qty %.6f | Risk $%.2f | Result %+.2fR / %+.2f | MFE %.2fR | MAE %.2fR", r.Order.Quantity, risk, r.RMultiple, r.RMultiple*risk, r.MFER, r.MAER)
+		fmt.Printf("%s %s %s %s %12s %12s %12s %12s %12s\n", modeCell("PAPER"), coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(compactStatus(r.Outcome), 13, false, statusColor(r.Outcome)), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
+		detail := fmt.Sprintf("        %s | %s | Result %s / %s | MFE %s | MAE %s", paint(ansiDim, fmt.Sprintf("Qty %.6f", r.Order.Quantity)), paint(ansiYellow, fmt.Sprintf("Risk $%.2f", risk)), signedR(r.RMultiple), signedMoney(r.RMultiple*risk), excursion(r.MFER, true), excursion(r.MAER, false))
 		if r.Outcome == "NO_FILL" && mark > 0 {
-			detail += fmt.Sprintf(" | Entry distance %.1fbps", math.Abs(mark-r.Order.Price)/r.Order.Price*10000)
+			detail += paint(ansiYellow, fmt.Sprintf(" | Entry distance %.1fbps", math.Abs(mark-r.Order.Price)/r.Order.Price*10000))
 		}
 		if r.ActualFill > 0 {
-			detail += fmt.Sprintf(" | Fill %s | Slip %.2fbps", price(r.ActualFill), r.EntrySlippageBPS)
+			detail += paint(ansiCyan, fmt.Sprintf(" | Fill %s | Slip %.2fbps", price(r.ActualFill), r.EntrySlippageBPS))
 		}
 		fmt.Println(detail)
 	}
-	fmt.Println(strings.Repeat("=", 96))
-	fmt.Printf("FILLED %d | WAITING %d | NO FILL %d | WINS %d | LOSSES %d | OPEN %d | ML SNAPSHOT: SHADOW ONLY\n", filled, waiting, noFill, wins, losses, open)
+	divider("=", 106)
+	fmt.Printf("%s %d | %s %d | %s %d | %s %d | %s %d | %s %d | %s\n", paint(ansiBold+ansiCyan, "FILLED"), filled, paint(ansiYellow, "WAITING"), waiting, paint(ansiYellow, "NO FILL"), noFill, paint(ansiBold+ansiGreen, "WINS"), wins, paint(ansiBold+ansiRed, "LOSSES"), losses, paint(ansiBold+ansiCyan, "OPEN"), open, paint(ansiDim+ansiMagenta, "ML SNAPSHOT: SHADOW ONLY"))
+}
+
+func excursion(value float64, favorable bool) string {
+	color := ansiBold + ansiGreen
+	if !favorable {
+		color = ansiBold + ansiRed
+	}
+	if value == 0 {
+		color = ansiDim
+	}
+	return paint(color, fmt.Sprintf("%.2fR", value))
 }
 
 func currentRecords(records []journal.TradeRecord, today time.Time, location *time.Location) map[string]journal.TradeRecord {
