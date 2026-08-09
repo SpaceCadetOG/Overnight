@@ -11,6 +11,7 @@ Group=traderbot
 WorkingDirectory=/opt/overnight-strategy
 EnvironmentFile=-/etc/overnight.env
 EnvironmentFile=-/etc/overnight-strategy.env
+EnvironmentFile=-/etc/overnight-lighter.env
 ExecStart=/opt/overnight-strategy/build/traderuntime -store /mnt/trading/research -live=true -poll=5s
 Restart=always
 RestartSec=5

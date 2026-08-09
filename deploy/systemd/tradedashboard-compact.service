@@ -7,6 +7,7 @@ Type=simple
 User=traderbot
 Group=traderbot
 EnvironmentFile=-/etc/overnight-strategy.env
+EnvironmentFile=-/etc/overnight-lighter.env
 ExecStart=/opt/overnight-strategy/build/tradedashboard -store /mnt/trading/research -paper-equity=100 -view=compact -refresh=20s
 Restart=always
 RestartSec=5

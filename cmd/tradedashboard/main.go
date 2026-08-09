@@ -54,8 +54,10 @@ func main() {
 	colorMode := flag.String("color", "auto", "terminal color: auto, always, or never")
 	flag.Parse()
 	colorEnabled = shouldColor(*colorMode)
-	if err := loadEnv(".env"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		fatal(err)
+	for _, path := range []string{"/etc/overnight-lighter.env", ".env"} {
+		if err := loadEnv(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fatal(err)
+		}
 	}
 	client, markets, err := accountClient()
 	for {
