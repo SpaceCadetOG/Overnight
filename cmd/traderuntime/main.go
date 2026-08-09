@@ -36,6 +36,7 @@ type liveRuntimeState struct {
 	StrategyOrderID  string                  `json:"strategy_order_id"`
 	TradeID          string                  `json:"trade_id"`
 	Symbol           string                  `json:"symbol"`
+	Order            execution.Order         `json:"order"`
 	Managed          *execution.ManagedTrade `json:"managed_trade"`
 	EntrySubmittedAt time.Time               `json:"entry_submitted_at"`
 	UpdatedAt        time.Time               `json:"updated_at"`
@@ -311,7 +312,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		runID := "run_live_" + strategyVersion + "_" + snapshot.SessionDate.Format("20060102")
 		ids := forensics.IDs(snapshot.SessionDate, asset.Symbol, strategyVersion, forensics.PlanOpportunityKey(*snapshot.Plan), "LIVE", runID)
 		state, exists := latest[ids.TradeID]
-		position := positionSize(account, asset.Symbol)
+		position, averageFill := positionFacts(account, asset.Symbol)
 		mark := liveMark(a.liveMarkets, asset.Symbol)
 		if !exists {
 			if !execution.WithinOrderWindow(now, snapshot.SessionDate, a.location) {
@@ -345,8 +346,11 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e = managed.SetEntryOrderID(response.OrderID); e != nil {
 				return e
 			}
-			state = liveRuntimeState{SchemaVersion: 1, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now}
+			state = liveRuntimeState{SchemaVersion: 1, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now}
 			if e = a.events.Append("live_runtime_states", state); e != nil {
+				return e
+			}
+			if e = a.persistLiveJournal(snapshot, asset, state); e != nil {
 				return e
 			}
 			fmt.Printf("%-5s LIVE ENTRY SUBMITTED qty=%.8f tx=%s\n", asset.Symbol, order.Quantity, response.OrderID)
@@ -357,6 +361,9 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		}
 		changed := false
 		if state.Managed.State == execution.ProtectionWaiting && position > 0 {
+			if averageFill > 0 {
+				state.Managed.Fill = averageFill
+			}
 			err = state.Managed.OnEntryFilled(a.liveExecutor)
 			changed = err == nil
 		} else if state.Managed.State == execution.ProtectionInitial && position > 0 && position <= state.Managed.RunnerQuantity+quantityTolerance(asset.Symbol) {
@@ -378,10 +385,29 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e := a.events.Append("live_runtime_states", state); e != nil {
 				return e
 			}
+			if e := a.persistLiveJournal(snapshot, asset, state); e != nil {
+				return e
+			}
 			fmt.Printf("%-5s LIVE %s position=%.8f\n", asset.Symbol, state.Managed.State, position)
 		}
 	}
 	return nil
+}
+
+func (a *app) persistLiveJournal(snapshot live.MarketSnapshot, asset universe.Asset, state liveRuntimeState) error {
+	paperState, outcome := execution.Waiting, "WAITING_FOR_FILL"
+	switch state.Managed.State {
+	case execution.ProtectionInitial:
+		paperState, outcome = execution.PaperFilled, "OPEN"
+	case execution.ProtectionRunner:
+		paperState, outcome = execution.PaperTP1, "TP1_OPEN"
+	case execution.ProtectionClosed:
+		paperState, outcome = execution.PaperClosed, "CLOSED"
+	}
+	record := journal.FromLive(snapshot, asset.MarketSymbol(), strategyVersion, state.Order, journal.LiveExecution{OrderID: state.Managed.EntryOrderID, State: string(paperState), Outcome: outcome, ActualFill: state.Managed.Fill, TP1Hit: state.Managed.State == execution.ProtectionRunner || state.Managed.State == execution.ProtectionClosed})
+	record.ID, record.SessionID, record.OpportunityID, record.StrategyOrderID = state.TradeID, state.SessionID, state.OpportunityID, state.StrategyOrderID
+	record.RunID = "run_live_" + strategyVersion + "_" + snapshot.SessionDate.Format("20060102")
+	return a.events.Append("trade_journal", record)
 }
 
 func latestSnapshots(values []live.MarketSnapshot) map[string]live.MarketSnapshot {
@@ -420,14 +446,15 @@ func latestLive(values []liveRuntimeState) map[string]liveRuntimeState {
 	}
 	return out
 }
-func positionSize(s lighterexec.Snapshot, symbol string) float64 {
+func positionFacts(s lighterexec.Snapshot, symbol string) (float64, float64) {
 	for _, p := range s.Positions {
 		if fmt.Sprint(p["symbol"]) == symbol {
 			n, _ := strconv.ParseFloat(fmt.Sprint(p["position"]), 64)
-			return math.Abs(n)
+			fill, _ := strconv.ParseFloat(fmt.Sprint(p["avg_entry_price"]), 64)
+			return math.Abs(n), fill
 		}
 	}
-	return 0
+	return 0, 0
 }
 func liveMark(markets []lighterexec.Market, symbol string) float64 {
 	for _, m := range markets {
