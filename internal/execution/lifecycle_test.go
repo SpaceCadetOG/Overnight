@@ -55,6 +55,23 @@ func TestFrozenLifecycleLongAndShort(t *testing.T) {
 	}
 }
 
+func TestManagedTradeUsesDistinctRestartSafeOrderIndexes(t *testing.T) {
+	trade, err := NewManagedTrade("BTC", "LONG", .0002, 100, 99, 101, 102, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := trade.SetStrategyOrderID("strategy-order-1"); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int64]bool{}
+	for _, index := range []int64{trade.EntryOrderIndex, trade.StopOrderIndex, trade.BreakevenOrderIndex, trade.TP1OrderIndex, trade.TP2OrderIndex} {
+		if index <= 0 || seen[index] {
+			t.Fatalf("invalid or duplicate client order index %d", index)
+		}
+		seen[index] = true
+	}
+}
+
 func TestResearchAssetCannotBecomeManagedLiveTrade(t *testing.T) {
 	if _, err := NewManagedTrade("SOL", "LONG", 1, 100, 90, 110, 120, time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("expected live authority rejection")

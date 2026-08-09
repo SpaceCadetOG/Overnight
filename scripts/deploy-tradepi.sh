@@ -5,7 +5,7 @@ artifact_dir=${1:?artifact directory is required}
 commit=${2:?git commit is required}
 host=${TRADEPI_SSH_HOST:-traderbot@192.168.3.28}
 staging="/opt/overnight-strategy/releases/$commit"
-required="lightercollector dailyplans eodexport tradedashboard collectorarchive packagevalidator lighterexecutor"
+required="lightercollector dailyplans eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime"
 
 for binary in $required; do
     [ -x "$artifact_dir/$binary" ] || {

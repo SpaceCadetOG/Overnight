@@ -29,7 +29,7 @@ func TestKillSwitchOverridesApproval(t *testing.T) {
 }
 
 func TestLiveGateUsesCanonicalAllowlist(t *testing.T) {
-	gate := Gate{Mode: Live, AllowedSymbols: map[string]bool{"BTC": true, "ETH": true}}
+	gate := Gate{Mode: Live, FundedEnabled: true, AllowedSymbols: map[string]bool{"BTC": true, "ETH": true}}
 	if err := gate.Authorize("BTC", time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +38,18 @@ func TestLiveGateUsesCanonicalAllowlist(t *testing.T) {
 	}
 	if err := gate.Authorize("SOL", time.Now()); err == nil {
 		t.Fatal("unstaged SOL accepted")
+	}
+}
+
+func TestLiveEnvironmentGateFailsClosed(t *testing.T) {
+	t.Setenv("ENABLE_FUNDED_EXECUTION", "false")
+	t.Setenv("KILL_SWITCH", "false")
+	if err := GateFromEnvironment(Live).Authorize("BTC", time.Now()); err == nil {
+		t.Fatal("funded route opened without explicit activation")
+	}
+	t.Setenv("ENABLE_FUNDED_EXECUTION", "true")
+	if err := GateFromEnvironment(Live).Authorize("BTC", time.Now()); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -148,6 +148,15 @@ Lifecycle callbacks are idempotent. Protective reduce-only orders remain
 available while the kill switch is active so an existing position can still be
 made safe or closed.
 
+`traderuntime` is the continuous lifecycle service. It always advances the
+paper route for all 12 markets. Its funded route is fail-closed and requires
+the `-live=true` process flag, `ENABLE_FUNDED_EXECUTION=true`,
+`KILL_SWITCH=false`, valid Lighter credentials, the 05:00-05:05 CT entry
+window, and BTC/ETH symbol authority. Leave `ENABLE_FUNDED_EXECUTION=false`
+during the paper dress rehearsal. Changing that protected TradePi environment
+value and restarting `traderuntime.service` is the explicit funded activation
+action.
+
 ## Production connectivity gate
 
 The executor must not start funded execution unless `lighterexecutor -check`

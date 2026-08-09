@@ -62,6 +62,11 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	runtimeTrades, err := store.ReadAll[execution.PaperTrade](*root, "paper_runtime_states")
+	if err != nil {
+		fatal(err)
+	}
+	trades = latestTradeStates(append(trades, runtimeTrades...))
 	events, err := store.ReadAll[forensics.Envelope](*root, "forensic_events")
 	if err != nil {
 		fatal(err)
@@ -136,6 +141,24 @@ func main() {
 	if !q.Passed {
 		os.Exit(1)
 	}
+}
+
+func latestTradeStates(values []execution.PaperTrade) []execution.PaperTrade {
+	latest := map[string]execution.PaperTrade{}
+	for _, trade := range values {
+		key := trade.TradeID
+		if key == "" {
+			key = trade.OpportunityID
+		}
+		if old, ok := latest[key]; !ok || trade.UpdatedAt.After(old.UpdatedAt) {
+			latest[key] = trade
+		}
+	}
+	out := make([]execution.PaperTrade, 0, len(latest))
+	for _, trade := range latest {
+		out = append(out, trade)
+	}
+	return out
 }
 func write(path string, value any) {
 	f, e := os.Create(path)

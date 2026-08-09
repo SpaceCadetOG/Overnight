@@ -17,11 +17,12 @@ const (
 type Gate struct {
 	Mode           Mode
 	KillSwitch     bool
+	FundedEnabled  bool
 	AllowedSymbols map[string]bool
 }
 
 func GateFromEnvironment(mode Mode) Gate {
-	return Gate{Mode: mode, KillSwitch: strings.EqualFold(strings.TrimSpace(os.Getenv("KILL_SWITCH")), "true"), AllowedSymbols: map[string]bool{"BTC": true, "ETH": true}}
+	return Gate{Mode: mode, KillSwitch: strings.EqualFold(strings.TrimSpace(os.Getenv("KILL_SWITCH")), "true"), FundedEnabled: strings.EqualFold(strings.TrimSpace(os.Getenv("ENABLE_FUNDED_EXECUTION")), "true"), AllowedSymbols: map[string]bool{"BTC": true, "ETH": true}}
 }
 
 func (g Gate) Authorize(symbol string, now time.Time) error {
@@ -33,6 +34,9 @@ func (g Gate) Authorize(symbol string, now time.Time) error {
 	}
 	if g.Mode != Live {
 		return fmt.Errorf("unknown execution mode %s", g.Mode)
+	}
+	if !g.FundedEnabled {
+		return fmt.Errorf("ENABLE_FUNDED_EXECUTION=true is required for funded orders")
 	}
 	if !g.AllowedSymbols[symbol] {
 		return fmt.Errorf("%s is outside staged live rollout", symbol)

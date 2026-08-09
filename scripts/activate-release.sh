@@ -5,7 +5,7 @@ release=${1:?release or rollback is required}
 root=/opt/overnight-strategy
 current="$root/current"
 previous="$root/previous"
-required="lightercollector dailyplans eodexport tradedashboard collectorarchive packagevalidator lighterexecutor"
+required="lightercollector dailyplans eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime"
 
 if [ "$release" = rollback ]; then
     target=$(readlink -f "$previous")
@@ -31,6 +31,7 @@ for unit in "$current"/systemd/*.service "$current"/systemd/*.timer; do
     install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
 systemctl daemon-reload
-systemctl enable lightercollector.service dailyplans.timer eodexport.timer lighterarchive.timer
+systemctl enable lightercollector.service traderuntime.service dailyplans.timer eodexport.timer lighterarchive.timer
 systemctl restart lightercollector.service
+systemctl restart traderuntime.service
 systemctl restart dailyplans.timer eodexport.timer lighterarchive.timer

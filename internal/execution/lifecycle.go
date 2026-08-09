@@ -19,13 +19,55 @@ const (
 )
 
 type ManagedTrade struct {
-	Symbol, Direction                                 string
-	Quantity, Fill, Stop, TP1, TP2                    float64
-	TP1Quantity, RunnerQuantity                       float64
-	Expiry                                            time.Time
-	State                                             ProtectionState
-	EntryOrderID, StopOrderID, TP1OrderID, TP2OrderID string
-	mu                                                sync.Mutex
+	Symbol, Direction                                                                  string
+	StrategyOrderID                                                                    string
+	Quantity, Fill, Stop, TP1, TP2                                                     float64
+	TP1Quantity, RunnerQuantity                                                        float64
+	Expiry                                                                             time.Time
+	State                                                                              ProtectionState
+	EntryOrderID, StopOrderID, TP1OrderID, TP2OrderID                                  string
+	EntryOrderIndex, StopOrderIndex, BreakevenOrderIndex, TP1OrderIndex, TP2OrderIndex int64
+	mu                                                                                 sync.Mutex
+}
+
+type indexedCanceler interface {
+	CancelIndexed(symbol string, index int64) error
+}
+
+func (t *ManagedTrade) SetStrategyOrderID(id string) error {
+	if id == "" {
+		return fmt.Errorf("strategy order ID is required")
+	}
+	t.StrategyOrderID = id
+	var err error
+	if t.EntryOrderIndex, err = ClientOrderIndex(id + ":entry"); err != nil {
+		return err
+	}
+	if t.StopOrderIndex, err = ClientOrderIndex(id + ":stop"); err != nil {
+		return err
+	}
+	if t.BreakevenOrderIndex, err = ClientOrderIndex(id + ":breakeven"); err != nil {
+		return err
+	}
+	if t.TP1OrderIndex, err = ClientOrderIndex(id + ":tp1"); err != nil {
+		return err
+	}
+	if t.TP2OrderIndex, err = ClientOrderIndex(id + ":tp2"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *ManagedTrade) cancel(executor Executor, orderID string, index int64) error {
+	if index > 0 {
+		if indexed, ok := executor.(indexedCanceler); ok {
+			return indexed.CancelIndexed(t.Symbol, index)
+		}
+	}
+	if orderID == "" {
+		return nil
+	}
+	return executor.Cancel(orderID)
 }
 
 func (t *ManagedTrade) SetEntryOrderID(orderID string) error {
@@ -81,13 +123,13 @@ func (t *ManagedTrade) OnEntryFilled(executor Executor) error {
 	if t.Direction == "SHORT" {
 		exitSide = "BUY"
 	}
-	stop, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.Stop, Size: t.Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Stop})
+	stop, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.Stop, Size: t.Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Stop, ClientOrderIndex: t.StopOrderIndex})
 	if err != nil {
 		return fmt.Errorf("submit initial stop: %w", err)
 	}
-	tp1, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.TP1, Size: t.TP1Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP1})
+	tp1, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.TP1, Size: t.TP1Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP1, ClientOrderIndex: t.TP1OrderIndex})
 	if err != nil {
-		_ = executor.Cancel(stop.OrderID)
+		_ = t.cancel(executor, stop.OrderID, t.StopOrderIndex)
 		return fmt.Errorf("submit TP1: %w", err)
 	}
 	t.StopOrderID, t.TP1OrderID, t.State = stop.OrderID, tp1.OrderID, ProtectionInitial
@@ -104,7 +146,7 @@ func (t *ManagedTrade) OnTP1Filled(executor Executor) error {
 		return fmt.Errorf("TP1 fill received in state %s", t.State)
 	}
 	t.TP1OrderID = ""
-	if err := executor.Cancel(t.StopOrderID); err != nil {
+	if err := t.cancel(executor, t.StopOrderID, t.StopOrderIndex); err != nil {
 		return fmt.Errorf("cancel initial stop: %w", err)
 	}
 	exitSide := "SELL"
@@ -112,13 +154,13 @@ func (t *ManagedTrade) OnTP1Filled(executor Executor) error {
 		exitSide = "BUY"
 	}
 	remaining := t.RunnerQuantity
-	be, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.Fill, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Fill})
+	be, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.Fill, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Fill, ClientOrderIndex: t.BreakevenOrderIndex})
 	if err != nil {
 		return fmt.Errorf("submit breakeven stop: %w", err)
 	}
-	tp2, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.TP2, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP2})
+	tp2, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.TP2, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP2, ClientOrderIndex: t.TP2OrderIndex})
 	if err != nil {
-		_ = executor.Cancel(be.OrderID)
+		_ = t.cancel(executor, be.OrderID, t.BreakevenOrderIndex)
 		return fmt.Errorf("submit TP2: %w", err)
 	}
 	t.StopOrderID, t.TP2OrderID, t.State = be.OrderID, tp2.OrderID, ProtectionRunner
@@ -132,11 +174,16 @@ func (t *ManagedTrade) OnClosed(executor Executor) error {
 		return nil
 	}
 	var first error
-	for _, id := range []string{t.StopOrderID, t.TP1OrderID, t.TP2OrderID} {
+	for i, id := range []string{t.StopOrderID, t.TP1OrderID, t.TP2OrderID} {
 		if id == "" {
 			continue
 		}
-		if err := executor.Cancel(id); err != nil && first == nil {
+		stopIndex := t.StopOrderIndex
+		if t.State == ProtectionRunner {
+			stopIndex = t.BreakevenOrderIndex
+		}
+		indices := []int64{stopIndex, t.TP1OrderIndex, t.TP2OrderIndex}
+		if err := t.cancel(executor, id, indices[i]); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -157,7 +204,7 @@ func (t *ManagedTrade) OnExpiry(executor Executor, remainingSize, referencePrice
 		if entryID == "" {
 			return fmt.Errorf("cannot expire entry without order ID")
 		}
-		if err := executor.Cancel(entryID); err != nil {
+		if err := t.cancel(executor, entryID, t.EntryOrderIndex); err != nil {
 			return err
 		}
 		t.mu.Lock()

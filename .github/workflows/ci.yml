@@ -98,6 +98,7 @@ jobs:
             collectorarchive \
             packagevalidator \
             lighterexecutor \
+            traderuntime \
             dailylevels \
             researchreport
           do

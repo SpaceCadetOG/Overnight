@@ -38,6 +38,90 @@ type PaperTrade struct {
 	MAE             float64    `json:"mae"`
 	RMultiple       float64    `json:"r_multiple"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+	LastCandleAt    time.Time  `json:"last_candle_at,omitempty"`
+}
+
+// AdvancePaper applies one new candle to a durable paper trade. Stop-first
+// ordering is deliberately conservative when a single bar crosses multiple
+// levels. After TP1, the remaining half is protected at the actual entry.
+func AdvancePaper(trade PaperTrade, candle models.Candle) (PaperTrade, bool, error) {
+	if !trade.LastCandleAt.IsZero() && !candle.OpenTime.After(trade.LastCandleAt) {
+		return trade, false, nil
+	}
+	if trade.State == PaperClosed || trade.State == PaperNoFill {
+		return trade, false, nil
+	}
+	changed := false
+	trade.LastCandleAt = candle.OpenTime
+	trade.UpdatedAt = time.Now().UTC()
+	if trade.State == Waiting && candle.OpenTime.Unix() > trade.Order.ExpiresAt {
+		trade.State, trade.Outcome = PaperNoFill, "NO_FILL"
+		return trade, true, nil
+	}
+	if trade.State == Waiting && candle.Low <= trade.Order.Price && candle.High >= trade.Order.Price {
+		trade.State, trade.FillPrice, trade.FillAt = PaperFilled, trade.Order.Price, candle.OpenTime
+		changed = true
+	}
+	if trade.State != PaperFilled && trade.State != PaperTP1 {
+		return trade, changed, nil
+	}
+	long := trade.Order.Side == "BUY"
+	risk := abs(trade.Order.Price - trade.Order.Stop)
+	if risk <= 0 {
+		return trade, changed, fmt.Errorf("paper trade has zero risk")
+	}
+	if long {
+		trade.MFE = max(trade.MFE, candle.High-trade.Order.Price)
+		trade.MAE = max(trade.MAE, trade.Order.Price-candle.Low)
+	} else {
+		trade.MFE = max(trade.MFE, trade.Order.Price-candle.Low)
+		trade.MAE = max(trade.MAE, candle.High-trade.Order.Price)
+	}
+	stop := trade.Order.Stop
+	if trade.TP1Hit {
+		stop = trade.FillPrice
+	}
+	if long && candle.Low <= stop || !long && candle.High >= stop {
+		trade.State, trade.ExitPrice, trade.ExitAt = PaperClosed, stop, candle.OpenTime
+		trade.Outcome, trade.RMultiple = "STOPPED", -1
+		if trade.TP1Hit {
+			trade.Outcome = "TP1_THEN_BE"
+			trade.RMultiple = .5 * rewardR(trade.Order.Price, trade.Order.TP1, risk)
+		}
+		return trade, true, nil
+	}
+	if trade.State == PaperFilled && (long && candle.High >= trade.Order.TP1 || !long && candle.Low <= trade.Order.TP1) {
+		trade.State, trade.TP1Hit, trade.TP1At = PaperTP1, true, candle.OpenTime
+		changed = true
+	}
+	if long && candle.High >= trade.Order.TP2 || !long && candle.Low <= trade.Order.TP2 {
+		trade.State, trade.ExitPrice, trade.ExitAt, trade.Outcome = PaperClosed, trade.Order.TP2, candle.OpenTime, "TP2"
+		trade.RMultiple = .5*rewardR(trade.Order.Price, trade.Order.TP1, risk) + .5*rewardR(trade.Order.Price, trade.Order.TP2, risk)
+		return trade, true, nil
+	}
+	return trade, changed, nil
+}
+
+func ExpirePaper(trade PaperTrade, at time.Time, mark float64) (PaperTrade, bool) {
+	if trade.State == PaperClosed || trade.State == PaperNoFill || at.Unix() < trade.Order.ExpiresAt {
+		return trade, false
+	}
+	trade.UpdatedAt, trade.ExitAt = at.UTC(), at.UTC()
+	if trade.State == Waiting {
+		trade.State, trade.Outcome = PaperNoFill, "NO_FILL"
+		return trade, true
+	}
+	trade.State, trade.ExitPrice, trade.Outcome = PaperClosed, mark, "EXPIRY"
+	risk := abs(trade.Order.Price - trade.Order.Stop)
+	move := mark - trade.Order.Price
+	if trade.Order.Side == "SELL" {
+		move = -move
+	}
+	trade.RMultiple = move / risk
+	if trade.TP1Hit {
+		trade.RMultiple = .5*rewardR(trade.Order.Price, trade.Order.TP1, risk) + .5*trade.RMultiple
+	}
+	return trade, true
 }
 
 func Simulate(order Order, candles []models.Candle) (PaperTrade, error) {
