@@ -42,14 +42,11 @@ func main() {
 		fatal(err)
 	}
 	client, markets, err := accountClient()
-	if err != nil {
-		fatal(err)
-	}
 	for {
 		if strings.EqualFold(*view, "detailed") {
-			detailedScreen(*root, *paperEquity, client, markets)
+			detailedScreen(*root, *paperEquity, client, markets, err)
 		} else {
-			screen(*root, *paperEquity, client, markets)
+			screen(*root, *paperEquity, client, markets, err)
 		}
 		if *once {
 			return
@@ -58,12 +55,12 @@ func main() {
 	}
 }
 
-func detailedScreen(root string, paperEquity float64, client *lighterexec.Client, accountMarkets []lighterexec.Market) {
+func detailedScreen(root string, paperEquity float64, client *lighterexec.Client, accountMarkets []lighterexec.Market, accountInitErr error) {
 	now := time.Now().UTC()
 	location, _ := time.LoadLocation("America/Chicago")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	account, accountErr := client.ReadSnapshot(ctx, accountMarkets)
+	account, accountErr := readAccountSnapshot(ctx, client, accountMarkets, accountInitErr)
 	publicMarkets, marketErr := lighterexec.CheckPublic(ctx, os.Getenv("LIGHTER_BASE_URL"))
 	marks := map[string]float64{}
 	if marketErr == nil {
@@ -146,11 +143,11 @@ func currentRecords(records []journal.TradeRecord, today time.Time, location *ti
 	return latest
 }
 
-func screen(root string, paperEquity float64, client *lighterexec.Client, markets []lighterexec.Market) {
+func screen(root string, paperEquity float64, client *lighterexec.Client, markets []lighterexec.Market, accountInitErr error) {
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	snapshot, accountErr := client.ReadSnapshot(ctx, markets)
+	snapshot, accountErr := readAccountSnapshot(ctx, client, markets, accountInitErr)
 	health, healthErr := readHealth(ctx)
 	records, recordsErr := store.ReadAll[journal.TradeRecord](root, "trade_journal")
 	latest := map[string]journal.TradeRecord{}
@@ -252,17 +249,13 @@ func price(value float64) string {
 func accountClient() (*lighterexec.Client, []lighterexec.Market, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	markets, err := lighterexec.CheckPublic(ctx, os.Getenv("LIGHTER_BASE_URL"))
-	if err != nil {
-		return nil, nil, err
-	}
 	account, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("LIGHTER_ACCOUNT_INDEX")), 10, 64)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("live account unavailable: LIGHTER_ACCOUNT_INDEX is not configured")
 	}
 	key, err := strconv.ParseUint(strings.TrimSpace(os.Getenv("LIGHTER_API_KEY_INDEX")), 10, 8)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("live account unavailable: LIGHTER_API_KEY_INDEX is not configured")
 	}
 	chain := uint64(304)
 	if raw := strings.TrimSpace(os.Getenv("LIGHTER_CHAIN_ID")); raw != "" {
@@ -275,6 +268,10 @@ func accountClient() (*lighterexec.Client, []lighterexec.Market, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	markets, err := lighterexec.CheckPublic(ctx, os.Getenv("LIGHTER_BASE_URL"))
+	if err != nil {
+		return nil, nil, err
+	}
 	live := []lighterexec.Market{}
 	for _, m := range markets {
 		for _, a := range universe.Live() {
@@ -284,6 +281,16 @@ func accountClient() (*lighterexec.Client, []lighterexec.Market, error) {
 		}
 	}
 	return client, live, nil
+}
+
+func readAccountSnapshot(ctx context.Context, client *lighterexec.Client, markets []lighterexec.Market, initErr error) (lighterexec.Snapshot, error) {
+	if initErr != nil {
+		return lighterexec.Snapshot{}, initErr
+	}
+	if client == nil {
+		return lighterexec.Snapshot{}, fmt.Errorf("live account unavailable")
+	}
+	return client.ReadSnapshot(ctx, markets)
 }
 
 func readHealth(ctx context.Context) (collectorHealth, error) {
