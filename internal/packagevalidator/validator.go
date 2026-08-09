@@ -15,9 +15,10 @@ import (
 )
 
 type File struct {
-	Path    string `json:"path"`
-	Records uint64 `json:"records"`
-	SHA256  string `json:"sha256"`
+	Path       string `json:"path"`
+	Compressed int64  `json:"compressed_bytes"`
+	Records    uint64 `json:"records"`
+	SHA256     string `json:"sha256"`
 }
 
 type Manifest struct {
