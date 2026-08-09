@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 type File struct {
@@ -114,23 +115,24 @@ func checksum(path string) (string, error) {
 }
 
 func countRows(path string) (uint64, error) {
-	command := exec.Command("zstd", "-q", "-dc", path)
-	stdout, err := command.StdoutPipe()
+	file, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	if err := command.Start(); err != nil {
+	defer file.Close()
+	reader, err := zstd.NewReader(file)
+	if err != nil {
 		return 0, err
 	}
+	defer reader.Close()
 	var count uint64
-	scanner := bufio.NewScanner(stdout)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		count++
 	}
 	if err := scanner.Err(); err != nil {
-		_ = command.Wait()
 		return 0, err
 	}
-	return count, command.Wait()
+	return count, nil
 }

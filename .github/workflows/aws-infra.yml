@@ -1,0 +1,61 @@
+name: AWS Trade Forensics Infrastructure
+
+on:
+  pull_request:
+    paths: ["infra/aws/**", "cmd/awsvalidator/**", "internal/packagevalidator/**", ".github/workflows/aws-infra.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/aws/**", "cmd/awsvalidator/**", "internal/packagevalidator/**", ".github/workflows/aws-infra.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: "1.25.4", cache: true}
+      - uses: hashicorp/setup-terraform@v3
+        with: {terraform_version: "1.15.8"}
+      - run: go test ./internal/packagevalidator
+      - run: terraform fmt -check -recursive infra/aws
+      - run: terraform -chdir=infra/aws init -backend=false
+      - run: terraform -chdir=infra/aws validate
+
+  apply:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: aws-production
+    concurrency: {group: aws-production, cancel-in-progress: false}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: "1.25.4", cache: true}
+      - uses: hashicorp/setup-terraform@v3
+        with: {terraform_version: "1.15.8"}
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Build validator Lambda
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -trimpath -o dist/bootstrap ./cmd/awsvalidator
+          cd dist && zip -q awsvalidator.zip bootstrap && rm bootstrap
+      - name: Terraform apply
+        env:
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_VAR_budget_email: ${{ secrets.AWS_BUDGET_EMAIL }}
+          TF_VAR_github_repository: ${{ github.repository }}
+        run: |
+          terraform -chdir=infra/aws init \
+            -backend-config="bucket=${{ vars.AWS_TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="key=trade-forensics/prod.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir=infra/aws apply -auto-approve -input=false

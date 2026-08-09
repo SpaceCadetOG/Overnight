@@ -29,6 +29,8 @@ output/
 
 # generated
 tmp/
+.terraform/
+*.tfplan
 
 # local configs
 configs/local.yaml
