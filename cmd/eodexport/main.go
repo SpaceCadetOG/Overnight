@@ -141,10 +141,29 @@ func main() {
 	b, _ := json.Marshal(map[string]any{"status": map[bool]string{true: "PASS", false: "FAIL"}[q.Passed], "package": dir, "rows": len(rows), "issues": q.Issues})
 	fmt.Println(string(b))
 	status := map[bool]string{true: "PASS", false: "FAIL"}[q.Passed]
-	_ = notify.FromEnvironment().Send(context.Background(), "Overnight EOD "+status, fmt.Sprintf("Date: %s\nPlans exported: %d/12\nData quality: %s\nIssues: %d", date.Format("2006-01-02"), len(rows), status, len(q.Issues)), map[bool]string{true: "default", false: "urgent"}[q.Passed], "clipboard,bar_chart")
+	report := journal.BuildDaily(journals, date, len(universe.All()))
+	notifier := notify.FromEnvironment()
+	if !notifier.Enabled() {
+		fmt.Fprintln(os.Stderr, "EOD notification not sent: NTFY_URL and NTFY_TOPIC are not configured")
+	} else if err := notifier.Send(context.Background(), "Overnight EOD "+status, eodMessage(report, status, len(q.Issues)), map[bool]string{true: "default", false: "urgent"}[q.Passed], "clipboard,bar_chart"); err != nil {
+		fmt.Fprintf(os.Stderr, "EOD notification delivery failed: %v\n", err)
+	}
 	if !q.Passed {
 		os.Exit(1)
 	}
+}
+
+func eodMessage(report journal.DailyReport, qualityStatus string, issues int) string {
+	lines := []string{
+		fmt.Sprintf("Date: %s", report.SessionDate),
+		fmt.Sprintf("Coverage: %d/%d | Quality: %s | Issues: %d", report.Records, report.ExpectedMarkets, qualityStatus, issues),
+		fmt.Sprintf("Filled: %d | Wins: %d | Losses: %d | No fill: %d | Open: %d", report.Filled, report.Wins, report.Losses, report.NoFill, report.Open),
+		fmt.Sprintf("Result: %+.2fR | Win rate: %.1f%% | Avg/fill: %+.2fR", report.TotalR, report.WinRate*100, report.AverageRPerFill),
+	}
+	for _, asset := range report.Assets {
+		lines = append(lines, fmt.Sprintf("%s: %s %+.2fR", asset.Symbol, asset.Outcome, asset.RMultiple))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func latestTradeStates(values []execution.PaperTrade) []execution.PaperTrade {
