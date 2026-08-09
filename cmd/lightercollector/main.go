@@ -13,6 +13,7 @@ import (
 
 	"github.com/ogtrading/overnight-strategy/internal/buildinfo"
 	"github.com/ogtrading/overnight-strategy/internal/collector"
+	"github.com/ogtrading/overnight-strategy/internal/notify"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 )
 
@@ -52,6 +53,7 @@ func main() {
 		}
 	}()
 	fmt.Printf("lighter collector running store=%s health=:%s automated_orders=false\n", *root, *port)
+	notify.FromEnvironment().BestEffort("Market Recorder Online", "TradePi Lighter recorder started\nExpected coverage: 12/12 markets", "high", "satellite,white_check_mark")
 	if err := c.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fatal(err)
 	}

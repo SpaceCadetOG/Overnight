@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	"github.com/ogtrading/overnight-strategy/internal/forensics"
 	"github.com/ogtrading/overnight-strategy/internal/journal"
+	"github.com/ogtrading/overnight-strategy/internal/notify"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
@@ -138,6 +140,8 @@ func main() {
 	write(filepath.Join(dir, "manifest.json"), manifest)
 	b, _ := json.Marshal(map[string]any{"status": map[bool]string{true: "PASS", false: "FAIL"}[q.Passed], "package": dir, "rows": len(rows), "issues": q.Issues})
 	fmt.Println(string(b))
+	status := map[bool]string{true: "PASS", false: "FAIL"}[q.Passed]
+	_ = notify.FromEnvironment().Send(context.Background(), "Overnight EOD "+status, fmt.Sprintf("Date: %s\nPlans exported: %d/12\nData quality: %s\nIssues: %d", date.Format("2006-01-02"), len(rows), status, len(q.Issues)), map[bool]string{true: "default", false: "urgent"}[q.Passed], "clipboard,bar_chart")
 	if !q.Passed {
 		os.Exit(1)
 	}

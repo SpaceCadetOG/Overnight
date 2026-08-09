@@ -23,6 +23,7 @@ import (
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
 	"github.com/ogtrading/overnight-strategy/internal/live"
 	lighterdata "github.com/ogtrading/overnight-strategy/internal/marketdata/lighter"
+	"github.com/ogtrading/overnight-strategy/internal/notify"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
@@ -55,6 +56,8 @@ type app struct {
 	account       *lighterexec.Client
 	liveMarkets   []lighterexec.Market
 	lastPaperAt   time.Time
+	lastHourlyAt  time.Time
+	notifier      *notify.Client
 }
 
 func main() {
@@ -76,18 +79,21 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested}
+	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment()}
 	if err := a.connect(ctx); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("trade runtime started paper=12/12 funded_requested=%t funded_enabled=%t\n", *liveRequested, a.liveExecutor != nil)
+	a.notifier.BestEffort("Overnight Strategy Online", fmt.Sprintf("TradePi runtime started\nPaper markets: 12/12\nBTC/ETH funded route: %t", a.liveExecutor != nil), "high", "white_check_mark,chart_with_upwards_trend")
 	for {
 		if err := a.reconcile(ctx, time.Now().UTC()); err != nil {
 			fmt.Fprintln(os.Stderr, "runtime reconciliation:", err)
 			_ = events.Append("runtime_health", map[string]any{"timestamp": time.Now().UTC(), "status": "DEGRADED", "error": err.Error()})
+			a.notifier.BestEffort("Overnight Runtime Degraded", err.Error(), "urgent", "warning")
 		} else {
 			_ = events.Append("runtime_health", map[string]any{"timestamp": time.Now().UTC(), "status": "PASS", "paper_assets": len(universe.All()), "funded_enabled": a.liveExecutor != nil})
 		}
+		a.hourlyNotice(time.Now().UTC())
 		if *once {
 			return
 		}
@@ -238,6 +244,7 @@ func (a *app) reconcilePaper(ctx context.Context, now time.Time, asset universe.
 			return err
 		}
 		fmt.Printf("%-5s PAPER %-18s R=%+.2f\n", asset.Symbol, trade.State, trade.RMultiple)
+		a.notifier.BestEffort("Paper Trade Update", fmt.Sprintf("%s %s\nResult: %+.2fR", asset.Symbol, trade.State, trade.RMultiple), "default", "memo")
 	}
 	if changed || !a.hasJournal(trade.TradeID) {
 		if err := a.persistPaperForensics(snapshot, asset, trade, runID); err != nil {
@@ -354,6 +361,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 				return e
 			}
 			fmt.Printf("%-5s LIVE ENTRY SUBMITTED qty=%.8f tx=%s\n", asset.Symbol, order.Quantity, response.OrderID)
+			a.notifier.BestEffort("LIVE Order Submitted", fmt.Sprintf("%s %s\nEntry: %.8f\nQuantity: %.8f", asset.Symbol, side, order.Price, order.Quantity), "high", "rotating_light")
 			continue
 		}
 		if state.Managed == nil || state.Managed.State == execution.ProtectionClosed {
@@ -389,9 +397,42 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 				return e
 			}
 			fmt.Printf("%-5s LIVE %s position=%.8f\n", asset.Symbol, state.Managed.State, position)
+			a.notifier.BestEffort("LIVE Trade Update", fmt.Sprintf("%s %s\nPosition: %.8f\nFill: %.8f", asset.Symbol, state.Managed.State, position, state.Managed.Fill), "high", "rotating_light")
 		}
 	}
 	return nil
+}
+
+func (a *app) hourlyNotice(now time.Time) {
+	if !a.notifier.Enabled() || (!a.lastHourlyAt.IsZero() && now.Sub(a.lastHourlyAt) < time.Hour) {
+		return
+	}
+	states, err := store.ReadAll[execution.PaperTrade](a.root, "paper_runtime_states")
+	if err != nil {
+		return
+	}
+	latest := map[string]execution.PaperTrade{}
+	for _, state := range states {
+		if old, ok := latest[state.TradeID]; !ok || state.UpdatedAt.After(old.UpdatedAt) {
+			latest[state.TradeID] = state
+		}
+	}
+	filled, waiting, closed, noFill, totalR := 0, 0, 0, 0, 0.0
+	for _, state := range latest {
+		switch state.State {
+		case execution.Waiting:
+			waiting++
+		case execution.PaperNoFill:
+			noFill++
+		case execution.PaperClosed:
+			closed++
+		default:
+			filled++
+		}
+		totalR += state.RMultiple
+	}
+	a.notifier.BestEffort("Overnight Session Update", fmt.Sprintf("Tracked: %d/12\nFilled/open: %d\nWaiting: %d\nClosed: %d\nNo fill: %d\nRealized result: %+.2fR", len(latest), filled, waiting, closed, noFill, totalR), "default", "bar_chart")
+	a.lastHourlyAt = now
 }
 
 func (a *app) persistLiveJournal(snapshot live.MarketSnapshot, asset universe.Asset, state liveRuntimeState) error {
