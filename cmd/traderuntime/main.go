@@ -58,6 +58,9 @@ type app struct {
 	lastPaperAt   time.Time
 	lastHourlyAt  time.Time
 	notifier      *notify.Client
+	degraded      bool
+	lastAlertAt   time.Time
+	lastAlertKey  string
 }
 
 func main() {
@@ -86,12 +89,17 @@ func main() {
 	fmt.Printf("trade runtime started paper=12/12 funded_requested=%t funded_enabled=%t\n", *liveRequested, a.liveExecutor != nil)
 	a.notifier.BestEffort("Overnight Strategy Online", fmt.Sprintf("TradePi runtime started\nPaper markets: 12/12\nBTC/ETH funded route: %t", a.liveExecutor != nil), "high", "white_check_mark,chart_with_upwards_trend")
 	for {
-		if err := a.reconcile(ctx, time.Now().UTC()); err != nil {
+		now := time.Now().UTC()
+		checked, err := a.reconcile(ctx, now)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "runtime reconciliation:", err)
-			_ = events.Append("runtime_health", map[string]any{"timestamp": time.Now().UTC(), "status": "DEGRADED", "error": err.Error()})
-			a.notifier.BestEffort("Overnight Runtime Degraded", err.Error(), "urgent", "warning")
+			_ = events.Append("runtime_health", map[string]any{"timestamp": now, "status": "DEGRADED", "error": err.Error()})
+			a.notifyDegraded(now, err)
 		} else {
-			_ = events.Append("runtime_health", map[string]any{"timestamp": time.Now().UTC(), "status": "PASS", "paper_assets": len(universe.All()), "funded_enabled": a.liveExecutor != nil})
+			_ = events.Append("runtime_health", map[string]any{"timestamp": now, "status": "PASS", "paper_assets": len(universe.All()), "funded_enabled": a.liveExecutor != nil})
+			if checked {
+				a.notifyRecovered()
+			}
 		}
 		a.hourlyNotice(time.Now().UTC())
 		if *once {
@@ -157,18 +165,21 @@ func (a *app) connect(ctx context.Context) error {
 	return nil
 }
 
-func (a *app) reconcile(ctx context.Context, now time.Time) error {
+func (a *app) reconcile(ctx context.Context, now time.Time) (bool, error) {
 	snapshots, err := store.ReadAll[live.MarketSnapshot](a.root, "market_snapshots")
 	if err != nil {
-		return err
+		return true, err
 	}
 	latest := latestSnapshots(snapshots)
 	intents, err := store.ReadAll[live.Intent](a.root, "paper_strategy_intents")
 	if err != nil {
-		return err
+		return true, err
 	}
 	latestIntents := live.LatestIntents(intents)
+	var problems []error
+	checked := false
 	if a.lastPaperAt.IsZero() || now.Sub(a.lastPaperAt) >= time.Minute {
+		checked = true
 		for _, asset := range universe.All() {
 			snapshot, ok := latest[asset.Symbol]
 			if !ok || snapshot.Plan == nil || !snapshot.Plan.Valid {
@@ -179,15 +190,63 @@ func (a *app) reconcile(ctx context.Context, now time.Time) error {
 				continue
 			}
 			if err := a.reconcilePaper(ctx, now, asset, snapshot, intent); err != nil {
-				return fmt.Errorf("%s paper: %w", asset.Symbol, err)
+				problems = append(problems, fmt.Errorf("%s paper: %w", asset.Symbol, err))
+				continue
 			}
 		}
 		a.lastPaperAt = now
 	}
 	if a.liveExecutor != nil {
-		return a.reconcileLive(ctx, now, latest, latestIntents)
+		checked = true
+		if err := a.reconcileLive(ctx, now, latest, latestIntents); err != nil {
+			problems = append(problems, fmt.Errorf("live reconciliation: %w", err))
+		}
 	}
-	return nil
+	return checked, errors.Join(problems...)
+}
+
+func (a *app) notifyDegraded(now time.Time, err error) {
+	key, message := runtimeErrorSummary(err)
+	shouldAlert := !a.degraded || key != a.lastAlertKey || now.Sub(a.lastAlertAt) >= 15*time.Minute
+	a.degraded = true
+	if !shouldAlert {
+		return
+	}
+	a.lastAlertAt, a.lastAlertKey = now, key
+	a.notifier.BestEffort("Overnight Runtime Degraded", message+"\nTrading state preserved; retrying automatically.", "urgent", "warning")
+}
+
+func (a *app) notifyRecovered() {
+	if !a.degraded {
+		return
+	}
+	a.degraded = false
+	a.notifier.BestEffort("Overnight Runtime Recovered", "Lighter connectivity and runtime reconciliation are healthy again.", "high", "white_check_mark")
+}
+
+func runtimeErrorSummary(err error) (string, string) {
+	if err == nil {
+		return "", ""
+	}
+	message := err.Error()
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "http 503") || strings.Contains(lower, "503 service temporarily unavailable") {
+		return "lighter-http-503", "Lighter API temporarily unavailable (HTTP 503)."
+	}
+	if strings.Contains(lower, "http 502") {
+		return "lighter-http-502", "Lighter API temporarily unavailable (HTTP 502)."
+	}
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
+		return "lighter-timeout", "Lighter API request timed out."
+	}
+	if strings.Contains(lower, "dial tcp") || strings.Contains(lower, "connection refused") {
+		return "lighter-connection", "Lighter connection unavailable."
+	}
+	const limit = 180
+	if len(message) > limit {
+		message = message[:limit-3] + "..."
+	}
+	return message, message
 }
 
 func (a *app) reconcilePaper(ctx context.Context, now time.Time, asset universe.Asset, snapshot live.MarketSnapshot, intent live.Intent) error {

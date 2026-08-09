@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -8,6 +9,13 @@ import (
 	"github.com/ogtrading/overnight-strategy/internal/journal"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 )
+
+func TestShortErrorHidesLighterHTMLResponse(t *testing.T) {
+	got := shortError(errors.New("Lighter /api/v1/account returned HTTP 503: <html><body>temporary unavailable</body></html>"))
+	if got != "Lighter API temporarily unavailable (HTTP 503)" {
+		t.Fatalf("got %q", got)
+	}
+}
 
 func TestDisplayStatusFallsBackToLifecycleState(t *testing.T) {
 	tests := []struct {

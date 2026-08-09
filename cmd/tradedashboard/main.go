@@ -423,6 +423,13 @@ func shortError(err error) string {
 		return ""
 	}
 	message := err.Error()
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "http 503") || strings.Contains(lower, "503 service temporarily unavailable") {
+		return "Lighter API temporarily unavailable (HTTP 503)"
+	}
+	if strings.Contains(lower, "http 502") {
+		return "Lighter API temporarily unavailable (HTTP 502)"
+	}
 	if strings.Contains(message, "LIGHTER_ACCOUNT_INDEX") {
 		return "LIGHTER_ACCOUNT_INDEX is not configured"
 	}
