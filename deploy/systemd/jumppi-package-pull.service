@@ -1,0 +1,16 @@
+[Unit]
+Description=Overnight Strategy - pull and validate closed TradePi package
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader2
+WorkingDirectory=/srv/trade-forensics
+Environment=FORENSICS_ROOT=/srv/trade-forensics
+ExecStart=/srv/trade-forensics/bin/jumppi-pull-tradepi.sh
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
