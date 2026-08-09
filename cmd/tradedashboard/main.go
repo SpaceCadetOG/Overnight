@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ogtrading/overnight-strategy/internal/execution"
 	"github.com/ogtrading/overnight-strategy/internal/journal"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
 	"github.com/ogtrading/overnight-strategy/internal/store"
@@ -88,6 +89,7 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 	}
 	records, _ := store.ReadAll[journal.TradeRecord](root, "trade_journal")
 	latest := currentRecords(records, now.In(location), location)
+	overlayPaperRuntime(root, latest, now.In(location), location)
 	var realized, openPnL, totalR, riskCommitted float64
 	filled, waiting, noFill, wins, losses, open := 0, 0, 0, 0, 0, 0
 	for _, r := range latest {
@@ -122,6 +124,7 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 	} else {
 		fmt.Printf("%s %s\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
 	}
+	printActiveTrades(latest, nil)
 	detailedDivider("-")
 	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("| %-3s | %-5s | %-5s | %-12s | %9s | %9s | %9s | %9s | %9s |", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "MARK", "STOP", "TP1", "TP2")))
 	detailedDivider("-")
@@ -138,7 +141,7 @@ func detailedScreen(root string, paperEquity float64, client *lighterexec.Client
 		}
 		mark := marks[asset.MarketSymbol()]
 		risk := paperEquity * .005
-		printDetailedRow("PAPER", asset.Symbol, side, compactStatus(r.Outcome), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
+		printDetailedRow("PAPER", asset.Symbol, side, displayStatus(r), price(r.Order.Price), price(mark), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2))
 		detail := fmt.Sprintf("|     |       | %s | %s | Result %s / %s", paint(ansiDim, fmt.Sprintf("Qty %.6f", r.Order.Quantity)), paint(ansiYellow, fmt.Sprintf("Risk $%.2f", risk)), signedR(r.RMultiple), signedMoney(r.RMultiple*risk))
 		excursions := fmt.Sprintf("|     |       | MFE %s | MAE %s", excursion(r.MFER, true), excursion(r.MAER, false))
 		if r.Outcome == "NO_FILL" && mark > 0 {
@@ -226,6 +229,7 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 		latest = map[string]journal.TradeRecord{}
 		liveLatest = map[string]journal.TradeRecord{}
 	}
+	overlayPaperRuntime(root, latest, today, location)
 	var totalR, realized, openPnL, riskCommitted float64
 	for _, r := range latest {
 		risk := paperEquity * .005
@@ -272,6 +276,7 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 	}
 	currentEquity := paperEquity + realized + openPnL
 	fmt.Printf("%s Start $%.2f  Equity %s  Realized %s  Open %s  Total %s  Risk $%.2f\n", paint(ansiBold+ansiBlue, "PAPER"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted)
+	printActiveTrades(latest, liveLatest)
 	divider("-", 112)
 	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-7s %-5s %-5s %-12s %12s %12s %12s %12s %8s %9s", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")))
 	divider("-", 112)
@@ -307,7 +312,91 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 }
 
 func printTradeRow(mode, symbol, side string, r journal.TradeRecord, pnl float64) {
-	fmt.Printf("%s %s %s %s %12s %12s %12s %12s %s %s\n", modeCell(mode), coloredCell(symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(compactStatus(r.Outcome), 12, false, statusColor(r.Outcome)), price(r.Order.Price), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2), paint(signColor(r.RMultiple), fmt.Sprintf("%+7.2fR", r.RMultiple)), paint(signColor(pnl), fmt.Sprintf("%+8.2f", pnl)))
+	status := displayStatus(r)
+	fmt.Printf("%s %s %s %s %12s %12s %12s %12s %s %s\n", modeCell(mode), coloredCell(symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(status, 12, false, statusColor(status)), price(r.Order.Price), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2), paint(signColor(r.RMultiple), fmt.Sprintf("%+7.2fR", r.RMultiple)), paint(signColor(pnl), fmt.Sprintf("%+8.2f", pnl)))
+}
+
+func overlayPaperRuntime(root string, records map[string]journal.TradeRecord, today time.Time, location *time.Location) {
+	states, err := store.ReadAll[execution.PaperTrade](root, "paper_runtime_states")
+	if err != nil {
+		return
+	}
+	for _, state := range states {
+		if state.SessionDate.In(location).Format("2006-01-02") != today.Format("2006-01-02") {
+			continue
+		}
+		symbol := state.Order.Symbol
+		asset, ok := universe.Find(symbol)
+		if ok {
+			symbol = asset.Symbol
+		}
+		record, exists := records[symbol]
+		if !exists {
+			record = journal.TradeRecord{Symbol: symbol, Mode: "PAPER_EXECUTION", SessionDate: state.SessionDate, Order: state.Order}
+		}
+		record.State, record.Outcome, record.RMultiple = state.State, state.Outcome, state.RMultiple
+		record.ActualFill, record.ExitPrice, record.MFE, record.MAE, record.TP1Hit, record.RecordedAt = state.FillPrice, state.ExitPrice, state.MFE, state.MAE, state.TP1Hit, state.UpdatedAt
+		risk := math.Abs(state.Order.Price - state.Order.Stop)
+		if risk > 0 {
+			record.MFER, record.MAER = state.MFE/risk, state.MAE/risk
+		}
+		records[symbol] = record
+	}
+}
+
+func displayStatus(r journal.TradeRecord) string {
+	if strings.TrimSpace(r.Outcome) != "" {
+		return compactStatus(r.Outcome)
+	}
+	switch r.State {
+	case execution.Waiting:
+		return "WAIT FILL"
+	case execution.PaperFilled:
+		return "FILLED"
+	case execution.PaperTP1:
+		return "TP1/RUN"
+	case execution.PaperClosed:
+		return "CLOSED"
+	case execution.PaperNoFill:
+		return "NO FILL"
+	default:
+		return "PLANNED"
+	}
+}
+
+func activeTrade(r journal.TradeRecord) bool {
+	return r.State == execution.PaperFilled || r.State == execution.PaperTP1 || r.Outcome == "OPEN" || r.Outcome == "TP1_OPEN"
+}
+
+func printActiveTrades(paper, liveRecords map[string]journal.TradeRecord) {
+	type row struct {
+		mode, symbol, side, status string
+		r                          float64
+	}
+	rows := []row{}
+	collect := func(mode string, records map[string]journal.TradeRecord) {
+		for _, asset := range universe.All() {
+			r, ok := records[asset.Symbol]
+			if !ok || !activeTrade(r) {
+				continue
+			}
+			side := "LONG"
+			if r.Order.Side == "SELL" {
+				side = "SHORT"
+			}
+			rows = append(rows, row{mode, asset.Symbol, side, displayStatus(r), r.RMultiple})
+		}
+	}
+	collect("PAPER", paper)
+	collect("LIVE", liveRecords)
+	if len(rows) == 0 {
+		fmt.Printf("%s %s\n", paint(ansiBold+ansiBlue, "ACTIVE TRADES"), paint(ansiDim, "NONE"))
+		return
+	}
+	fmt.Printf("%s %d\n", paint(ansiBold+ansiBlue, "ACTIVE TRADES"), len(rows))
+	for _, item := range rows {
+		fmt.Printf("  %s %s %s %s  Result %s\n", modeCell(item.mode), coloredCell(item.symbol, 5, false, ansiBold+ansiCyan), coloredCell(item.side, 5, false, sideColor(item.side)), paint(statusColor(item.status), item.status), signedR(item.r))
+	}
 }
 
 func modeCell(mode string) string {
@@ -392,8 +481,10 @@ func statusColor(status string) string {
 		return ansiBold + ansiYellow
 	case "OPEN", "FILLED":
 		return ansiBold + ansiCyan
-	case "NO_FILL", "WAITING_FOR_FILL", "WAIT PLAN":
+	case "NO_FILL", "NO FILL", "WAITING_FOR_FILL", "WAIT FILL", "WAIT PLAN", "PLANNED":
 		return ansiYellow
+	case "CLOSED":
+		return ansiDim
 	default:
 		return ""
 	}
