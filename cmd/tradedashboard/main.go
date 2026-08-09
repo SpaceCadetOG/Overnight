@@ -31,13 +31,29 @@ type collectorHealth struct {
 	BooksReady            int       `json:"books_ready"`
 }
 
+const (
+	ansiReset   = "\033[0m"
+	ansiBold    = "\033[1m"
+	ansiDim     = "\033[2m"
+	ansiRed     = "\033[31m"
+	ansiGreen   = "\033[32m"
+	ansiYellow  = "\033[33m"
+	ansiBlue    = "\033[34m"
+	ansiMagenta = "\033[35m"
+	ansiCyan    = "\033[36m"
+)
+
+var colorEnabled bool
+
 func main() {
 	root := flag.String("store", "data/test-run", "paper test-run store")
 	refresh := flag.Duration("refresh", 10*time.Second, "screen refresh interval")
 	paperEquity := flag.Float64("paper-equity", 100, "paper account starting equity")
 	view := flag.String("view", "compact", "compact or detailed")
 	once := flag.Bool("once", false, "print one screen and exit")
+	colorMode := flag.String("color", "auto", "terminal color: auto, always, or never")
 	flag.Parse()
+	colorEnabled = shouldColor(*colorMode)
 	if err := loadEnv(".env"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fatal(err)
 	}
@@ -176,10 +192,10 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 		}
 	}
 	fmt.Print("\033[2J\033[H")
-	fmt.Printf("OVERNIGHT PAPER BOARD                                      %s\n", now.Format("2006-01-02 15:04:05 UTC"))
-	fmt.Println(strings.Repeat("=", 104))
+	fmt.Printf("%s                                      %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT PAPER BOARD"), paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")))
+	divider("=", 104)
 	if accountErr != nil {
-		fmt.Printf("LIGHTER ACCOUNT  ERROR: %v\n", accountErr)
+		fmt.Printf("%s  %s\n", paint(ansiBold+ansiBlue, "LIGHTER ACCOUNT"), paint(ansiBold+ansiRed, "ERROR: "+accountErr.Error()))
 	} else {
 		balance := value(snapshot.Account, "collateral", "total_asset_value")
 		available := value(snapshot.Account, "available_balance")
@@ -189,21 +205,34 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 			used = 0
 		}
 		upnl := positionSum(snapshot.Positions, "unrealized_pnl", "unrealized_pnl_usdc", "unrealized_profit")
-		fmt.Printf("LIVE  Bal $%.2f  Eq $%.2f  Avail $%.2f  Margin $%.2f  uPnL %+.2f  Pos %d  Orders %d  [READ ONLY]\n", balance, equity, available, used, upnl, openPositions(snapshot.Positions), len(snapshot.Orders))
+		fmt.Printf("%s  Bal $%.2f  Eq %s  Avail $%.2f  Margin $%.2f  uPnL %s  Pos %d  Orders %d  %s\n", paint(ansiBold+ansiBlue, "LIVE"), balance, signedMoney(equity), available, used, signedMoney(upnl), openPositions(snapshot.Positions), len(snapshot.Orders), paint(ansiDim+ansiCyan, "[READ ONLY]"))
 	}
 	if healthErr != nil {
-		fmt.Printf("MARKET DATA      ERROR: %v\n", healthErr)
+		fmt.Printf("%s      %s\n", paint(ansiBold+ansiBlue, "MARKET DATA"), paint(ansiBold+ansiRed, "ERROR: "+healthErr.Error()))
 	} else {
-		fmt.Printf("DATA  Connected %-5t  Books %2d/12  Events %-8d  Gaps %-2d  Reconnects %-2d  Liq %d/%d\n", health.Connected, health.BooksReady, health.Events, health.NonceGaps, health.Reconnects, health.ConfirmedLiquidations, health.InferredCascades)
+		connected := paint(ansiBold+ansiRed, "false")
+		if health.Connected {
+			connected = paint(ansiBold+ansiGreen, "true ")
+		}
+		books := paint(ansiBold+ansiRed, fmt.Sprintf("%2d/12", health.BooksReady))
+		if health.BooksReady == len(universe.All()) {
+			books = paint(ansiBold+ansiGreen, fmt.Sprintf("%2d/12", health.BooksReady))
+		}
+		gaps := paint(ansiBold+ansiGreen, fmt.Sprintf("%-2d", health.NonceGaps))
+		if health.NonceGaps > 0 {
+			gaps = paint(ansiBold+ansiRed, fmt.Sprintf("%-2d", health.NonceGaps))
+		}
+		fmt.Printf("%s  Connected %s  Books %s  Events %-8d  Gaps %s  Reconnects %-2d  Liq %d/%d\n", paint(ansiBold+ansiBlue, "DATA"), connected, books, health.Events, gaps, health.Reconnects, health.ConfirmedLiquidations, health.InferredCascades)
 	}
-	fmt.Printf("PAPER Start $%.2f  Equity $%.2f  Realized %+.2f  Open %+.2f  Total %+.2fR  Risk $%.2f\n", paperEquity, paperEquity+realized+openPnL, realized, openPnL, totalR, riskCommitted)
-	fmt.Println(strings.Repeat("-", 104))
-	fmt.Printf("%-5s %-5s %-12s %12s %12s %12s %12s %8s %9s\n", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")
-	fmt.Println(strings.Repeat("-", 104))
+	currentEquity := paperEquity + realized + openPnL
+	fmt.Printf("%s Start $%.2f  Equity %s  Realized %s  Open %s  Total %s  Risk $%.2f\n", paint(ansiBold+ansiBlue, "PAPER"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted)
+	divider("-", 104)
+	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-5s %-5s %-12s %12s %12s %12s %12s %8s %9s", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")))
+	divider("-", 104)
 	for _, asset := range universe.All() {
 		r, ok := latest[asset.Symbol]
 		if !ok {
-			fmt.Printf("%-5s %-5s %-12s %12s %12s %12s %12s %8s %9s\n", asset.Symbol, "—", "WAIT PLAN", "—", "—", "—", "—", "—", "—")
+			fmt.Printf("%s %s %s %12s %12s %12s %12s %8s %9s\n", coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell("—", 5, false, ansiDim), coloredCell("WAIT PLAN", 12, false, ansiYellow), "—", "—", "—", "—", "—", "—")
 			continue
 		}
 		side := "LONG"
@@ -211,10 +240,70 @@ func screen(root string, paperEquity float64, client *lighterexec.Client, market
 			side = "SHORT"
 		}
 		pnl := r.RMultiple * (paperEquity * .005)
-		fmt.Printf("%-5s %-5s %-12s %12s %12s %12s %12s %+7.2fR %+8.2f\n", asset.Symbol, side, compactStatus(r.Outcome), price(r.Order.Price), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2), r.RMultiple, pnl)
+		fmt.Printf("%s %s %s %12s %12s %12s %12s %s %s\n", coloredCell(asset.Symbol, 5, false, ansiBold+ansiCyan), coloredCell(side, 5, false, sideColor(side)), coloredCell(compactStatus(r.Outcome), 12, false, statusColor(r.Outcome)), price(r.Order.Price), price(r.Order.Stop), price(r.Order.TP1), price(r.Order.TP2), paint(signColor(r.RMultiple), fmt.Sprintf("%+7.2fR", r.RMultiple)), paint(signColor(pnl), fmt.Sprintf("%+8.2f", pnl)))
 	}
-	fmt.Println(strings.Repeat("=", 104))
-	fmt.Printf("12 PAPER SYSTEMS | FUNDED OFF | NEXT PLAN %s\n", nextPlan(now, location).Format("2006-01-02 15:04 UTC"))
+	divider("=", 104)
+	fmt.Printf("%s | %s | %s %s\n", paint(ansiBold+ansiCyan, "12 PAPER SYSTEMS"), paint(ansiBold+ansiYellow, "FUNDED OFF"), paint(ansiBold+ansiBlue, "NEXT PLAN"), paint(ansiBold, nextPlan(now, location).Format("2006-01-02 15:04 UTC")))
+}
+
+func shouldColor(mode string) bool {
+	if os.Getenv("NO_COLOR") != "" || strings.EqualFold(mode, "never") {
+		return false
+	}
+	if strings.EqualFold(mode, "always") {
+		return true
+	}
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0 && !strings.EqualFold(os.Getenv("TERM"), "dumb")
+}
+
+func paint(code, value string) string {
+	if !colorEnabled || code == "" {
+		return value
+	}
+	return code + value + ansiReset
+}
+func divider(char string, width int) {
+	fmt.Println(paint(ansiDim+ansiBlue, strings.Repeat(char, width)))
+}
+func coloredCell(value string, width int, right bool, color string) string {
+	if right {
+		return paint(color, fmt.Sprintf("%*s", width, value))
+	}
+	return paint(color, fmt.Sprintf("%-*s", width, value))
+}
+func signColor(value float64) string {
+	if value > 0 {
+		return ansiBold + ansiGreen
+	}
+	if value < 0 {
+		return ansiBold + ansiRed
+	}
+	return ansiDim
+}
+func signedMoney(value float64) string { return paint(signColor(value), fmt.Sprintf("%+.2f", value)) }
+func signedR(value float64) string     { return paint(signColor(value), fmt.Sprintf("%+.2fR", value)) }
+func sideColor(side string) string {
+	if side == "LONG" {
+		return ansiBlue
+	}
+	return ansiMagenta
+}
+func statusColor(status string) string {
+	switch status {
+	case "TP2", "TP2_COMPLETE":
+		return ansiBold + ansiGreen
+	case "STOPPED":
+		return ansiBold + ansiRed
+	case "TP1_THEN_BE", "TP1_THEN_STOP", "TP1_OPEN":
+		return ansiBold + ansiYellow
+	case "OPEN", "FILLED":
+		return ansiBold + ansiCyan
+	case "NO_FILL", "WAITING_FOR_FILL":
+		return ansiYellow
+	default:
+		return ""
+	}
 }
 
 func compactStatus(value string) string {
