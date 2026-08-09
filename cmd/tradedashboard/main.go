@@ -126,8 +126,9 @@ func detailedScreen(root, marketDataRoot string, paperEquity float64, client *li
 	fmt.Printf("%s / %s\n", paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")), paint(ansiDim+ansiCyan, now.In(location).Format("15:04:05 CT")))
 	detailedDivider("=")
 	currentEquity := paperEquity + realized + openPnL
+	weeklyR := priorWeeklyR(records, now, location) + totalR
 	fmt.Printf("%s  Start $%.2f | Equity %s | Realized %s | Unrealized %s\n", paint(ansiBold+ansiBlue, "PAPER ACCOUNT"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL))
-	fmt.Printf("%s Result %s | Risk $%.2f | %s\n", strings.Repeat(" ", 15), signedR(totalR), riskCommitted, paint(ansiBold+ansiYellow, "FUNDED OFF"))
+	fmt.Printf("%s DAILY R %s | WEEKLY R %s | Risk $%.2f | %s\n", strings.Repeat(" ", 15), signedR(totalR), signedR(weeklyR), riskCommitted, paint(ansiBold+ansiYellow, "FUNDED OFF"))
 	if accountErr == nil {
 		fmt.Printf("%s Balance $%.2f | Available $%.2f | Margin $%.2f | Positions %d | Orders %d\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), value(account.Account, "collateral"), value(account.Account, "available_balance"), max0(value(account.Account, "collateral")-value(account.Account, "available_balance")), openPositions(account.Positions), len(account.Orders))
 	} else {
@@ -211,6 +212,39 @@ func currentRecords(records []journal.TradeRecord, today time.Time, location *ti
 	return latest
 }
 
+// priorWeeklyR returns completed paper results from Monday 00:00 CT through
+// yesterday. The caller adds today's mark-to-market R so active trades are
+// represented exactly once.
+func priorWeeklyR(records []journal.TradeRecord, now time.Time, location *time.Location) float64 {
+	today := chicagoDayStart(now, location)
+	daysSinceMonday := (int(today.Weekday()) + 6) % 7
+	weekStart := today.AddDate(0, 0, -daysSinceMonday)
+	latest := map[string]journal.TradeRecord{}
+	for _, r := range records {
+		if r.Mode == "LIVE_EXECUTION" {
+			continue
+		}
+		session := chicagoDayStart(r.SessionDate, location)
+		if session.Before(weekStart) || !session.Before(today) {
+			continue
+		}
+		key := session.Format("2006-01-02") + "|" + r.Symbol
+		if old, ok := latest[key]; !ok || r.RecordedAt.After(old.RecordedAt) {
+			latest[key] = r
+		}
+	}
+	var total float64
+	for _, r := range latest {
+		total += r.RMultiple
+	}
+	return total
+}
+
+func chicagoDayStart(t time.Time, location *time.Location) time.Time {
+	local := t.In(location)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
+}
+
 func screen(root, marketDataRoot string, paperEquity float64, client *lighterexec.Client, markets []lighterexec.Market, accountInitErr error) {
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -289,7 +323,8 @@ func screen(root, marketDataRoot string, paperEquity float64, client *lighterexe
 		fmt.Printf("%s  Connected %s  Books %s  Events %-8d  Gaps %s  Reconnects %-2d  Liq %d/%d\n", paint(ansiBold+ansiBlue, "DATA"), connected, books, health.Events, gaps, health.Reconnects, health.ConfirmedLiquidations, health.InferredCascades)
 	}
 	currentEquity := paperEquity + realized + openPnL
-	fmt.Printf("%s Start $%.2f  Equity %s  Realized %s  Open %s  Total %s  Risk $%.2f\n", paint(ansiBold+ansiBlue, "PAPER"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), riskCommitted)
+	weeklyR := priorWeeklyR(records, now, location) + totalR
+	fmt.Printf("%s Start $%.2f  Equity %s  Realized %s  Open %s  Daily R %s  Weekly R %s  Risk $%.2f\n", paint(ansiBold+ansiBlue, "PAPER"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL), signedR(totalR), signedR(weeklyR), riskCommitted)
 	printActiveTrades(latest, liveLatest, snapshot.Positions, marks, paperEquity, accountErr == nil)
 	divider("-", 112)
 	fmt.Println(paint(ansiBold+ansiCyan, fmt.Sprintf("%-7s %-5s %-5s %-12s %12s %12s %12s %12s %8s %9s", "MODE", "ASSET", "SIDE", "STATUS", "ENTRY", "STOP", "TP1", "TP2", "R", "PNL")))

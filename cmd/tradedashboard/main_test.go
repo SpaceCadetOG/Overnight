@@ -81,3 +81,32 @@ func TestReadRecorderMarksUsesLastTicker(t *testing.T) {
 		t.Fatalf("mark=%v", marks["BTC"].Price)
 	}
 }
+
+func TestCurrentRecordsResetsAtChicagoMidnight(t *testing.T) {
+	location, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 8, 10, 0, 1, 0, 0, location)
+	records := []journal.TradeRecord{
+		{Symbol: "BTC", SessionDate: now.Add(-2 * time.Minute), RecordedAt: now.Add(-2 * time.Minute), RMultiple: 5},
+		{Symbol: "ETH", SessionDate: now, RecordedAt: now, RMultiple: 1},
+	}
+	got := currentRecords(records, now, location)
+	if len(got) != 1 || got["ETH"].RMultiple != 1 {
+		t.Fatalf("daily records did not reset at Chicago midnight: %#v", got)
+	}
+}
+
+func TestPriorWeeklyRResetsMondayAndUsesLatestResult(t *testing.T) {
+	location, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, location) // Wednesday
+	records := []journal.TradeRecord{
+		{Symbol: "BTC", SessionDate: time.Date(2026, 8, 9, 12, 0, 0, 0, location), RecordedAt: now.Add(-72 * time.Hour), RMultiple: 10}, // Sunday: excluded
+		{Symbol: "BTC", SessionDate: time.Date(2026, 8, 10, 12, 0, 0, 0, location), RecordedAt: now.Add(-48 * time.Hour), RMultiple: -1},
+		{Symbol: "BTC", SessionDate: time.Date(2026, 8, 10, 12, 0, 0, 0, location), RecordedAt: now.Add(-47 * time.Hour), RMultiple: 2}, // latest Monday value
+		{Symbol: "ETH", SessionDate: time.Date(2026, 8, 11, 12, 0, 0, 0, location), RecordedAt: now.Add(-24 * time.Hour), RMultiple: 1},
+		{Symbol: "SOL", SessionDate: now, RecordedAt: now, RMultiple: 8},                                            // today: caller adds live daily R
+		{Symbol: "ETH", Mode: "LIVE_EXECUTION", SessionDate: now.AddDate(0, 0, -1), RecordedAt: now, RMultiple: 20}, // live: excluded
+	}
+	if got := priorWeeklyR(records, now, location); got != 3 {
+		t.Fatalf("priorWeeklyR=%v, want 3", got)
+	}
+}
