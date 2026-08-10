@@ -53,3 +53,15 @@ func TestTelegramMessageContract(t *testing.T) {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
 }
+
+func TestTelegramCommandNormalization(t *testing.T) {
+	for input, want := range map[string]string{
+		"/scanner":                  "/scanner",
+		" /STATUS@OvernightBot now": "/status",
+		"":                          "",
+	} {
+		if got := telegramCommand(input); got != want {
+			t.Fatalf("command %q=%q want %q", input, got, want)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,12 +20,13 @@ type Client struct {
 	telegramEndpoint string
 	telegramChatID   string
 	http             *http.Client
+	pollHTTP         *http.Client
 }
 
 func FromEnvironment() *Client {
 	base := strings.TrimRight(strings.TrimSpace(os.Getenv("NTFY_URL")), "/")
 	topic := strings.Trim(strings.TrimSpace(os.Getenv("NTFY_TOPIC")), "/")
-	c := &Client{http: &http.Client{Timeout: 5 * time.Second}}
+	c := &Client{http: &http.Client{Timeout: 5 * time.Second}, pollHTTP: &http.Client{Timeout: 35 * time.Second}}
 	if base != "" && topic != "" {
 		c.endpoint = base + "/" + url.PathEscape(topic)
 	}
@@ -48,7 +50,7 @@ func NewTelegram(endpoint, chatID string, client *http.Client) *Client {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	return &Client{telegramEndpoint: endpoint, telegramChatID: chatID, http: client}
+	return &Client{telegramEndpoint: endpoint, telegramChatID: chatID, http: client, pollHTTP: client}
 }
 
 func (c *Client) Enabled() bool {
@@ -129,4 +131,92 @@ func (c *Client) BestEffort(title, message, priority, tags string) {
 		defer cancel()
 		_ = c.Send(ctx, title, message, priority, tags)
 	}()
+}
+
+// PollTelegramCommands long-polls the configured bot and accepts commands only
+// from TELEGRAM_CHAT_ID. Delivery is observability-only and never gates trading.
+func (c *Client) PollTelegramCommands(ctx context.Context, handler func(context.Context, string) (string, string)) {
+	if c == nil || c.telegramEndpoint == "" || c.telegramChatID == "" || handler == nil {
+		return
+	}
+	endpoint := strings.TrimSuffix(c.telegramEndpoint, "/sendMessage") + "/getUpdates"
+	client := c.pollHTTP
+	if client == nil {
+		client = &http.Client{Timeout: 35 * time.Second}
+	}
+	var offset int64
+	for ctx.Err() == nil {
+		query := url.Values{"timeout": {"20"}, "allowed_updates": {"[\"message\"]"}}
+		if offset > 0 {
+			query.Set("offset", strconv.FormatInt(offset, 10))
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
+		if err != nil {
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			if !waitForRetry(ctx) {
+				return
+			}
+			continue
+		}
+		var payload struct {
+			OK     bool `json:"ok"`
+			Result []struct {
+				UpdateID int64 `json:"update_id"`
+				Message  *struct {
+					Text string `json:"text"`
+					Chat struct {
+						ID int64 `json:"id"`
+					} `json:"chat"`
+				} `json:"message"`
+			} `json:"result"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+		_ = resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 || decodeErr != nil || !payload.OK {
+			if !waitForRetry(ctx) {
+				return
+			}
+			continue
+		}
+		for _, update := range payload.Result {
+			if update.UpdateID >= offset {
+				offset = update.UpdateID + 1
+			}
+			if update.Message == nil || strconv.FormatInt(update.Message.Chat.ID, 10) != c.telegramChatID {
+				continue
+			}
+			command := telegramCommand(update.Message.Text)
+			if command == "" {
+				continue
+			}
+			title, message := handler(ctx, command)
+			if title != "" {
+				_ = c.sendTelegram(ctx, title, message)
+			}
+		}
+	}
+}
+
+func telegramCommand(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+	command := strings.ToLower(fields[0])
+	if at := strings.IndexByte(command, '@'); at >= 0 {
+		command = command[:at]
+	}
+	return command
+}
+
+func waitForRetry(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(5 * time.Second):
+		return true
+	}
 }

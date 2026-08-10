@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
@@ -41,5 +42,25 @@ func TestAccountEquityFallsBackToCollateral(t *testing.T) {
 	snapshot := lighterexec.Snapshot{Account: map[string]any{"total_asset_value": "0", "collateral": "28.949788"}}
 	if got := accountEquity(snapshot); got != 28.949788 {
 		t.Fatalf("equity=%v", got)
+	}
+}
+
+func TestCycle1FundedEntryBoundary(t *testing.T) {
+	if cycle1EntryAuthorized(cycle1StartUTC.Add(-time.Nanosecond)) {
+		t.Fatal("funded entry authorized before cycle start")
+	}
+	if !cycle1EntryAuthorized(cycle1StartUTC) || !cycle1EntryAuthorized(cycle1EndUTC.Add(-time.Nanosecond)) {
+		t.Fatal("funded entry rejected inside cycle")
+	}
+	if cycle1EntryAuthorized(cycle1EndUTC) {
+		t.Fatal("funded entry authorized at cycle end")
+	}
+}
+
+func TestNextPlanUTC(t *testing.T) {
+	location, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	if got := nextPlanUTC(now, location); !got.Equal(time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("next plan=%s", got)
 	}
 }

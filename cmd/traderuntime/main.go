@@ -30,6 +30,11 @@ import (
 
 const strategyVersion = "baseline-v1-20260810"
 
+var (
+	cycle1StartUTC = time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	cycle1EndUTC   = time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
+)
+
 type liveRuntimeState struct {
 	SchemaVersion    int                     `json:"schema_version"`
 	SessionID        string                  `json:"session_id"`
@@ -88,6 +93,7 @@ func main() {
 	}
 	fmt.Printf("trade runtime started paper=12/12 funded_requested=%t funded_enabled=%t\n", *liveRequested, a.liveExecutor != nil)
 	a.notifier.BestEffort("Overnight Strategy Online", fmt.Sprintf("TradePi runtime started\nPaper markets: 12/12\nBTC/ETH funded route: %t", a.liveExecutor != nil), "high", "white_check_mark,chart_with_upwards_trend")
+	go a.telegramCommands(ctx)
 	for {
 		now := time.Now().UTC()
 		checked, err := a.reconcile(ctx, now)
@@ -101,7 +107,7 @@ func main() {
 				a.notifyRecovered()
 			}
 		}
-		a.hourlyNotice(time.Now().UTC())
+		a.halfHourlyNotice(time.Now().UTC())
 		if *once {
 			return
 		}
@@ -385,6 +391,9 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		position, averageFill := positionFacts(account, asset.Symbol)
 		mark := liveMark(a.liveMarkets, asset.Symbol)
 		if !exists {
+			if !cycle1EntryAuthorized(now) {
+				continue
+			}
 			if !execution.WithinOrderWindow(now, snapshot.SessionDate, a.location) {
 				continue
 			}
@@ -471,6 +480,11 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 	return nil
 }
 
+func cycle1EntryAuthorized(now time.Time) bool {
+	now = now.UTC()
+	return !now.Before(cycle1StartUTC) && now.Before(cycle1EndUTC)
+}
+
 func accountEquity(snapshot lighterexec.Snapshot) float64 {
 	for _, key := range []string{"total_asset_value", "collateral"} {
 		value, err := strconv.ParseFloat(fmt.Sprint(snapshot.Account[key]), 64)
@@ -481,21 +495,64 @@ func accountEquity(snapshot lighterexec.Snapshot) float64 {
 	return 0
 }
 
-func (a *app) hourlyNotice(now time.Time) {
-	if !a.notifier.Enabled() || (!a.lastHourlyAt.IsZero() && now.Sub(a.lastHourlyAt) < time.Hour) {
+func (a *app) halfHourlyNotice(now time.Time) {
+	slot := now.Truncate(30 * time.Minute)
+	if !a.notifier.Enabled() || now.Sub(slot) > 90*time.Second || a.lastHourlyAt.Equal(slot) {
 		return
 	}
+	title, message := a.scannerMessage(context.Background(), now)
+	if title == "" {
+		return
+	}
+	a.notifier.BestEffort(title, message, "default", "bar_chart")
+	a.lastHourlyAt = slot
+}
+
+func (a *app) telegramCommands(ctx context.Context) {
+	a.notifier.PollTelegramCommands(ctx, func(request context.Context, command string) (string, string) {
+		switch command {
+		case "/scanner", "/status", "/board":
+			return a.scannerMessage(request, time.Now().UTC())
+		case "/help", "/start":
+			return "Overnight Strategy Commands", "/scanner - current 12-market board\n/status - same live status view\n/help - command list\n\nAutomatic scanner: every :00 and :30 UTC"
+		default:
+			return "", ""
+		}
+	})
+}
+
+func (a *app) scannerMessage(ctx context.Context, now time.Time) (string, string) {
 	states, err := store.ReadAll[execution.PaperTrade](a.root, "paper_runtime_states")
 	if err != nil {
-		return
+		return "", ""
 	}
 	latest := map[string]execution.PaperTrade{}
+	day := now.In(a.location).Format("2006-01-02")
 	for _, state := range states {
-		if old, ok := latest[state.TradeID]; !ok || state.UpdatedAt.After(old.UpdatedAt) {
-			latest[state.TradeID] = state
+		if state.SessionDate.In(a.location).Format("2006-01-02") != day {
+			continue
+		}
+		if old, ok := latest[state.Order.Symbol]; !ok || state.UpdatedAt.After(old.UpdatedAt) {
+			latest[state.Order.Symbol] = state
 		}
 	}
 	filled, waiting, closed, noFill, totalR := 0, 0, 0, 0, 0.0
+	var rows []string
+	for _, asset := range universe.All() {
+		state, ok := latest[asset.MarketSymbol()]
+		if !ok {
+			state, ok = latest[asset.Symbol]
+		}
+		if !ok {
+			rows = append(rows, fmt.Sprintf("%-5s WAIT PLAN", asset.Symbol))
+			continue
+		}
+		side := "LONG"
+		if state.Order.Side == "SELL" {
+			side = "SHORT"
+		}
+		rows = append(rows, fmt.Sprintf("%-5s %-5s %-11s %+.2fR", asset.Symbol, side, telegramState(state), state.RMultiple))
+	}
 	for _, state := range latest {
 		switch state.State {
 		case execution.Waiting:
@@ -509,8 +566,49 @@ func (a *app) hourlyNotice(now time.Time) {
 		}
 		totalR += state.RMultiple
 	}
-	a.notifier.BestEffort("Overnight Session Update", fmt.Sprintf("Tracked: %d/12\nFilled/open: %d\nWaiting: %d\nClosed: %d\nNo fill: %d\nRealized result: %+.2fR", len(latest), filled, waiting, closed, noFill, totalR), "default", "bar_chart")
-	a.lastHourlyAt = now
+	liveLine := "LIVE FUNDED | account unavailable"
+	if a.liveExecutor == nil {
+		liveLine = "LIVE READ-ONLY"
+	} else if a.account != nil {
+		request, cancel := context.WithTimeout(ctx, 8*time.Second)
+		snapshot, snapshotErr := a.account.ReadSnapshot(request, a.liveMarkets)
+		cancel()
+		if snapshotErr == nil {
+			liveLine = fmt.Sprintf("LIVE FUNDED | Eq $%.2f | Pos %d | Orders %d", accountEquity(snapshot), openPositionCount(snapshot.Positions), len(snapshot.Orders))
+		}
+	}
+	message := fmt.Sprintf("%s / %s CT\n%s\nDATA 12/12 markets\n\n%s\n\nTracked %d/12 | Open %d | Waiting %d\nClosed %d | No fill %d | Total %+.2fR\nNext plan: %s", now.Format("2006-01-02 15:04 UTC"), now.In(a.location).Format("15:04"), liveLine, strings.Join(rows, "\n"), len(latest), filled, waiting, closed, noFill, totalR, nextPlanUTC(now, a.location).Format("2006-01-02 15:04 UTC"))
+	return "Overnight Scanner", message
+}
+
+func telegramState(state execution.PaperTrade) string {
+	if state.Outcome != "" {
+		return state.Outcome
+	}
+	return string(state.State)
+}
+
+func openPositionCount(positions []map[string]any) int {
+	count := 0
+	for _, position := range positions {
+		for _, key := range []string{"position", "size", "position_size"} {
+			value, err := strconv.ParseFloat(fmt.Sprint(position[key]), 64)
+			if err == nil && value != 0 {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+func nextPlanUTC(now time.Time, location *time.Location) time.Time {
+	local := now.In(location)
+	next := time.Date(local.Year(), local.Month(), local.Day(), 5, 0, 0, 0, location)
+	if !local.Before(next) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next.UTC()
 }
 
 func (a *app) persistLiveJournal(snapshot live.MarketSnapshot, asset universe.Asset, state liveRuntimeState) error {
