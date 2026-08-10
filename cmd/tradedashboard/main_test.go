@@ -110,3 +110,20 @@ func TestPriorWeeklyRResetsMondayAndUsesLatestResult(t *testing.T) {
 		t.Fatalf("priorWeeklyR=%v, want 3", got)
 	}
 }
+
+func TestExecutionDisplayReflectsRealGate(t *testing.T) {
+	tests := []struct {
+		gate       execution.Gate
+		live, fund string
+	}{
+		{execution.Gate{}, "LIVE READ-ONLY", "FUNDED OFF"},
+		{execution.Gate{FundedEnabled: true}, "LIVE FUNDED", "FUNDED ON"},
+		{execution.Gate{FundedEnabled: true, KillSwitch: true}, "LIVE KILLED", "FUNDED BLOCKED"},
+	}
+	for _, test := range tests {
+		live, fund, _, _ := executionDisplay(test.gate)
+		if live != test.live || fund != test.fund {
+			t.Fatalf("got %q/%q want %q/%q", live, fund, test.live, test.fund)
+		}
+	}
+}

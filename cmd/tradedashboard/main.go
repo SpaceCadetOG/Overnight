@@ -127,12 +127,13 @@ func detailedScreen(root, marketDataRoot string, paperEquity float64, client *li
 	detailedDivider("=")
 	currentEquity := paperEquity + realized + openPnL
 	weeklyR := priorWeeklyR(records, now, location) + totalR
+	liveLabel, fundedLabel, liveColor, fundedColor := executionDisplay(execution.GateFromEnvironment(execution.Live))
 	fmt.Printf("%s  Start $%.2f | Equity %s | Realized %s | Unrealized %s\n", paint(ansiBold+ansiBlue, "PAPER ACCOUNT"), paperEquity, paint(signColor(currentEquity-paperEquity), fmt.Sprintf("$%.2f", currentEquity)), signedMoney(realized), signedMoney(openPnL))
-	fmt.Printf("%s DAILY R %s | WEEKLY R %s | Risk $%.2f | %s\n", strings.Repeat(" ", 15), signedR(totalR), signedR(weeklyR), riskCommitted, paint(ansiBold+ansiYellow, "FUNDED OFF"))
+	fmt.Printf("%s DAILY R %s | WEEKLY R %s | Risk $%.2f | %s\n", strings.Repeat(" ", 15), signedR(totalR), signedR(weeklyR), riskCommitted, paint(fundedColor, fundedLabel))
 	if accountErr == nil {
-		fmt.Printf("%s Balance $%.2f | Available $%.2f | Margin $%.2f | Positions %d | Orders %d\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), value(account.Account, "collateral"), value(account.Account, "available_balance"), max0(value(account.Account, "collateral")-value(account.Account, "available_balance")), openPositions(account.Positions), len(account.Orders))
+		fmt.Printf("%s Balance $%.2f | Available $%.2f | Margin $%.2f | Positions %d | Orders %d\n", paint(liveColor, liveLabel), value(account.Account, "collateral"), value(account.Account, "available_balance"), max0(value(account.Account, "collateral")-value(account.Account, "available_balance")), openPositions(account.Positions), len(account.Orders))
 	} else {
-		fmt.Printf("%s %s\n", paint(ansiBold+ansiCyan, "LIVE READ-ONLY"), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
+		fmt.Printf("%s %s\n", paint(liveColor, liveLabel), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
 	}
 	printActiveTrades(latest, nil, account.Positions, marks, paperEquity, accountErr == nil)
 	detailedDivider("-")
@@ -292,6 +293,7 @@ func screen(root, marketDataRoot string, paperEquity float64, client *lighterexe
 	fmt.Print("\033[2J\033[H")
 	fmt.Printf("%s %s %s                         %s\n", paint(ansiBold+ansiCyan, "OVERNIGHT TRADING BOARD"), paint(ansiBold+ansiBlue, "[PAPER]"), paint(ansiBold+ansiMagenta, "[LIVE]"), paint(ansiBold, now.Format("2006-01-02 15:04:05 UTC")))
 	divider("=", 112)
+	liveLabel, fundedLabel, liveColor, fundedColor := executionDisplay(execution.GateFromEnvironment(execution.Live))
 	if accountErr != nil {
 		fmt.Printf("%s  %s\n", paint(ansiBold+ansiBlue, "LIGHTER ACCOUNT"), paint(ansiBold+ansiRed, "ERROR: "+shortError(accountErr)))
 	} else {
@@ -303,7 +305,7 @@ func screen(root, marketDataRoot string, paperEquity float64, client *lighterexe
 			used = 0
 		}
 		upnl := positionSum(snapshot.Positions, "unrealized_pnl", "unrealized_pnl_usdc", "unrealized_profit")
-		fmt.Printf("%s  Bal $%.2f  Eq %s  Avail $%.2f  Margin $%.2f  uPnL %s  Pos %d  Orders %d  %s\n", paint(ansiBold+ansiBlue, "LIVE"), balance, signedMoney(equity), available, used, signedMoney(upnl), openPositions(snapshot.Positions), len(snapshot.Orders), paint(ansiDim+ansiCyan, "[READ ONLY]"))
+		fmt.Printf("%s  Bal $%.2f  Eq %s  Avail $%.2f  Margin $%.2f  uPnL %s  Pos %d  Orders %d  %s\n", paint(liveColor, "LIVE"), balance, signedMoney(equity), available, used, signedMoney(upnl), openPositions(snapshot.Positions), len(snapshot.Orders), paint(fundedColor, "["+liveLabel+"]"))
 	}
 	if healthErr != nil {
 		fmt.Printf("%s      %s\n", paint(ansiBold+ansiBlue, "MARKET DATA"), paint(ansiBold+ansiRed, "ERROR: "+shortError(healthErr)))
@@ -357,7 +359,17 @@ func screen(root, marketDataRoot string, paperEquity float64, client *lighterexe
 		}
 	}
 	divider("=", 112)
-	fmt.Printf("%s | %s | %s %s\n", paint(ansiBold+ansiCyan, "12 PAPER SYSTEMS"), paint(ansiBold+ansiYellow, "FUNDED OFF"), paint(ansiBold+ansiBlue, "NEXT PLAN"), paint(ansiBold, nextPlan(now, location).Format("2006-01-02 15:04 UTC")))
+	fmt.Printf("%s | %s | %s %s\n", paint(ansiBold+ansiCyan, "12 PAPER SYSTEMS"), paint(fundedColor, fundedLabel), paint(ansiBold+ansiBlue, "NEXT PLAN"), paint(ansiBold, nextPlan(now, location).Format("2006-01-02 15:04 UTC")))
+}
+
+func executionDisplay(gate execution.Gate) (liveLabel, fundedLabel, liveColor, fundedColor string) {
+	if gate.KillSwitch {
+		return "LIVE KILLED", "FUNDED BLOCKED", ansiBold + ansiRed, ansiBold + ansiRed
+	}
+	if gate.FundedEnabled {
+		return "LIVE FUNDED", "FUNDED ON", ansiBold + ansiGreen, ansiBold + ansiGreen
+	}
+	return "LIVE READ-ONLY", "FUNDED OFF", ansiBold + ansiCyan, ansiBold + ansiYellow
 }
 
 func markForRecord(marks map[string]recorderMark, record journal.TradeRecord) recorderMark {
