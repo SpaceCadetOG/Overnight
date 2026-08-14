@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/ogtrading/overnight-strategy/internal/execution"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type EventType string
 
@@ -55,6 +57,7 @@ type Envelope struct {
 	Venue           string          `json:"venue"`
 	Mode            string          `json:"mode"`
 	StrategyVersion string          `json:"strategy_version"`
+	RuntimeVersion  string          `json:"runtime_version"`
 	RunID           string          `json:"run_id"`
 	Source          string          `json:"source"`
 	Sequence        uint64          `json:"sequence"`
@@ -77,7 +80,7 @@ func New(eventType EventType, occurredAt time.Time, sequence uint64, ids Identit
 		return Envelope{}, err
 	}
 	eventID := stable("evt", ids.RunID, ids.OpportunityID, string(eventType), fmt.Sprint(sequence))
-	return Envelope{EventID: eventID, EventType: eventType, SchemaVersion: SchemaVersion, OccurredAt: occurredAt.UTC(), RecordedAt: time.Now().UTC(), SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, OrderID: ids.OrderID, PositionID: ids.PositionID, CaseID: ids.CaseID, Symbol: symbol, Venue: "LIGHTER", Mode: strings.ToUpper(mode), StrategyVersion: strategyVersion, RunID: ids.RunID, Source: "tradepi", Sequence: sequence, Payload: body}, nil
+	return Envelope{EventID: eventID, EventType: eventType, SchemaVersion: SchemaVersion, OccurredAt: occurredAt.UTC(), RecordedAt: time.Now().UTC(), SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, OrderID: ids.OrderID, PositionID: ids.PositionID, CaseID: ids.CaseID, Symbol: symbol, Venue: "LIGHTER", Mode: strings.ToUpper(mode), StrategyVersion: strategyVersion, RuntimeVersion: execution.LifecycleVersion, RunID: ids.RunID, Source: "tradepi", Sequence: sequence, Payload: body}, nil
 }
 
 func stable(prefix string, parts ...string) string {

@@ -20,6 +20,7 @@ type AssetDaily struct {
 type DailyReport struct {
 	SessionDate        string                `json:"session_date"`
 	StrategyVersion    string                `json:"strategy_version"`
+	RuntimeVersions    []string              `json:"runtime_versions"`
 	ExpectedMarkets    int                   `json:"expected_markets"`
 	Records            int                   `json:"records"`
 	Coverage           float64               `json:"coverage"`
@@ -64,11 +65,15 @@ func BuildDaily(records []TradeRecord, date time.Time, expected int) DailyReport
 		report.Coverage = float64(report.Records) / float64(expected)
 	}
 	slippageCount := 0
+	runtimeVersions := map[string]bool{}
 	for _, record := range latest {
 		filled := record.ActualFill > 0
 		row := AssetDaily{Symbol: record.Symbol, Mode: record.Mode, Outcome: record.Outcome, Filled: filled, RMultiple: record.RMultiple, MFER: record.MFER, MAER: record.MAER, SlippageBPS: record.EntrySlippageBPS}
 		report.Assets = append(report.Assets, row)
 		report.StrategyVersion = record.StrategyVersion
+		if record.RuntimeVersion != "" {
+			runtimeVersions[record.RuntimeVersion] = true
+		}
 		if record.Outcome == "NO_FILL" {
 			report.NoFill++
 			continue
@@ -99,6 +104,10 @@ func BuildDaily(records []TradeRecord, date time.Time, expected int) DailyReport
 	if slippageCount > 0 {
 		report.AverageSlippageBPS /= float64(slippageCount)
 	}
+	for version := range runtimeVersions {
+		report.RuntimeVersions = append(report.RuntimeVersions, version)
+	}
+	sort.Strings(report.RuntimeVersions)
 	sort.Slice(report.Assets, func(i, j int) bool {
 		if report.Assets[i].RMultiple == report.Assets[j].RMultiple {
 			return report.Assets[i].Symbol < report.Assets[j].Symbol

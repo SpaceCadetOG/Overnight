@@ -15,6 +15,7 @@ import (
 	"time"
 
 	lightertx "github.com/elliottech/lighter-go/types/txtypes"
+	"github.com/ogtrading/overnight-strategy/internal/buildinfo"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	executionlighter "github.com/ogtrading/overnight-strategy/internal/execution/lighter"
 	wsruntime "github.com/ogtrading/overnight-strategy/internal/execution/lighter/ws/runtime"
@@ -37,6 +38,7 @@ var (
 
 type liveRuntimeState struct {
 	SchemaVersion    int                     `json:"schema_version"`
+	LifecycleVersion string                  `json:"lifecycle_version"`
 	SessionID        string                  `json:"session_id"`
 	OpportunityID    string                  `json:"opportunity_id"`
 	StrategyOrderID  string                  `json:"strategy_order_id"`
@@ -50,22 +52,24 @@ type liveRuntimeState struct {
 }
 
 type app struct {
-	root          string
-	location      *time.Location
-	events        *store.JSONL
-	data          *lighterdata.Client
-	markets       map[string]lighterdata.Market
-	poll          time.Duration
-	liveRequested bool
-	liveExecutor  *executionlighter.Executor
-	account       *lighterexec.Client
-	liveMarkets   []lighterexec.Market
-	lastPaperAt   time.Time
-	lastHourlyAt  time.Time
-	notifier      *notify.Client
-	degraded      bool
-	lastAlertAt   time.Time
-	lastAlertKey  string
+	root            string
+	location        *time.Location
+	events          *store.JSONL
+	data            *lighterdata.Client
+	markets         map[string]lighterdata.Market
+	poll            time.Duration
+	liveRequested   bool
+	liveExecutor    *executionlighter.Executor
+	account         *lighterexec.Client
+	liveMarkets     []lighterexec.Market
+	lastPaperAt     time.Time
+	lastHourlyAt    time.Time
+	notifier        *notify.Client
+	degraded        bool
+	lastAlertAt     time.Time
+	lastAlertKey    string
+	researchIssues  map[string]string
+	researchAlertAt map[string]time.Time
 }
 
 func main() {
@@ -87,10 +91,11 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment()}
+	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment(), researchIssues: map[string]string{}, researchAlertAt: map[string]time.Time{}}
 	if err := a.connect(ctx); err != nil {
 		fatal(err)
 	}
+	_ = events.Append("runtime_deployments", map[string]any{"timestamp": time.Now().UTC(), "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion, "code_version": buildinfo.Version, "code_commit": buildinfo.Commit, "built_at": buildinfo.BuiltAt, "funded_enabled": a.liveExecutor != nil, "historical_records_mutated": false})
 	fmt.Printf("trade runtime started paper=12/12 funded_requested=%t funded_enabled=%t\n", *liveRequested, a.liveExecutor != nil)
 	a.notifier.BestEffort("Overnight Strategy Online", fmt.Sprintf("TradePi runtime started\nPaper markets: 12/12\nBTC/ETH funded route: %t", a.liveExecutor != nil), "high", "white_check_mark,chart_with_upwards_trend")
 	go a.telegramCommands(ctx)
@@ -196,8 +201,15 @@ func (a *app) reconcile(ctx context.Context, now time.Time) (bool, error) {
 				continue
 			}
 			if err := a.reconcilePaper(ctx, now, asset, snapshot, intent); err != nil {
+				if asset.ResearchOnly {
+					a.recordResearchIssue(now, asset.Symbol, err)
+					continue
+				}
 				problems = append(problems, fmt.Errorf("%s paper: %w", asset.Symbol, err))
 				continue
+			}
+			if asset.ResearchOnly {
+				a.clearResearchIssue(now, asset.Symbol)
 			}
 		}
 		a.lastPaperAt = now
@@ -209,6 +221,28 @@ func (a *app) reconcile(ctx context.Context, now time.Time) (bool, error) {
 		}
 	}
 	return checked, errors.Join(problems...)
+}
+
+func (a *app) recordResearchIssue(now time.Time, symbol string, err error) {
+	key, message := runtimeErrorSummary(err)
+	previous := a.researchIssues[symbol]
+	a.researchIssues[symbol] = key
+	if previous == key && now.Sub(a.researchAlertAt[symbol]) < 15*time.Minute {
+		return
+	}
+	a.researchAlertAt[symbol] = now
+	_ = a.events.Append("runtime_research_health", map[string]any{"timestamp": now, "symbol": symbol, "status": "DEGRADED", "error_key": key, "error": message, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion})
+	fmt.Fprintf(os.Stderr, "%s research runtime: %s\n", symbol, message)
+	a.notifier.BestEffort("Research Market Degraded", fmt.Sprintf("%s paper runtime: %s\nBTC/ETH live reconciliation continues.", symbol, message), "high", "warning")
+}
+
+func (a *app) clearResearchIssue(now time.Time, symbol string) {
+	if _, exists := a.researchIssues[symbol]; !exists {
+		return
+	}
+	delete(a.researchIssues, symbol)
+	_ = a.events.Append("runtime_research_health", map[string]any{"timestamp": now, "symbol": symbol, "status": "RECOVERED", "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion})
+	a.notifier.BestEffort("Research Market Recovered", symbol+" paper runtime is healthy again.", "default", "white_check_mark")
 }
 
 func (a *app) notifyDegraded(now time.Time, err error) {
@@ -278,7 +312,9 @@ func (a *app) reconcilePaper(ctx context.Context, now time.Time, asset universe.
 	}
 	trade, found := latestPaper(trades, ids.TradeID)
 	if !found {
-		trade = execution.PaperTrade{SchemaVersion: 1, SessionDate: snapshot.SessionDate, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, RunID: ids.RunID, Order: order, State: execution.Waiting, UpdatedAt: now}
+		trade = execution.PaperTrade{SchemaVersion: 1, LifecycleVersion: execution.LifecycleVersion, SessionDate: snapshot.SessionDate, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, RunID: ids.RunID, Order: order, State: execution.Waiting, UpdatedAt: now}
+	} else if trade.LifecycleVersion == "" {
+		trade.LifecycleVersion = execution.LifecycleVersion
 	}
 	start := time.Date(snapshot.SessionDate.Year(), snapshot.SessionDate.Month(), snapshot.SessionDate.Day(), 5, 0, 0, 0, a.location).UTC()
 	from := start
@@ -388,6 +424,9 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		runID := "run_live_" + strategyVersion + "_" + snapshot.SessionDate.Format("20060102")
 		ids := forensics.IDs(snapshot.SessionDate, asset.Symbol, strategyVersion, forensics.PlanOpportunityKey(*snapshot.Plan), "LIVE", runID)
 		state, exists := latest[ids.TradeID]
+		if exists && state.LifecycleVersion == "" {
+			state.LifecycleVersion = execution.LifecycleVersion
+		}
 		position, averageFill := positionFacts(account, asset.Symbol)
 		mark := liveMark(a.liveMarkets, asset.Symbol)
 		if !exists {
@@ -430,7 +469,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e = managed.SetEntryOrderID(response.OrderID); e != nil {
 				return e
 			}
-			state = liveRuntimeState{SchemaVersion: 1, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now}
+			state = liveRuntimeState{SchemaVersion: 1, LifecycleVersion: execution.LifecycleVersion, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now}
 			if e = a.events.Append("live_runtime_states", state); e != nil {
 				return e
 			}
@@ -444,20 +483,30 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		if state.Managed == nil || state.Managed.State == execution.ProtectionClosed {
 			continue
 		}
+		if averageFill > 0 && state.Managed.State == execution.ProtectionWaiting {
+			state.Managed.Fill = averageFill
+		}
+		plan := execution.PlanFromOrder(state.StrategyOrderID, state.Order)
+		decision, decisionErr := execution.EvaluateOvernightLifecycle(plan, managedLifecycleState(state.Managed), execution.LifecycleInput{
+			At: now, Mark: mark,
+			EntryFilled:    position > 0 && state.Managed.State == execution.ProtectionWaiting,
+			TP1Filled:      position > 0 && state.Managed.State == execution.ProtectionInitial && position <= state.Managed.RunnerQuantity+quantityTolerance(asset.Symbol),
+			PositionClosed: position == 0 && state.Managed.State != execution.ProtectionWaiting,
+			Expired:        !now.Before(state.Managed.Expiry),
+		})
 		changed := false
-		if state.Managed.State == execution.ProtectionWaiting && position > 0 {
-			if averageFill > 0 {
-				state.Managed.Fill = averageFill
-			}
+		if decisionErr != nil {
+			err = decisionErr
+		} else if containsLifecycleAction(decision.Actions, execution.ActionEntryFilled) {
 			err = state.Managed.OnEntryFilled(a.liveExecutor)
 			changed = err == nil
-		} else if state.Managed.State == execution.ProtectionInitial && position > 0 && position <= state.Managed.RunnerQuantity+quantityTolerance(asset.Symbol) {
+		} else if containsLifecycleAction(decision.Actions, execution.ActionTakeTP1) {
 			err = state.Managed.OnTP1Filled(a.liveExecutor)
 			changed = err == nil
-		} else if state.Managed.State != execution.ProtectionWaiting && position == 0 {
+		} else if containsLifecycleAction(decision.Actions, execution.ActionReconcileClosed) {
 			err = state.Managed.OnClosed(a.liveExecutor)
 			changed = err == nil
-		} else if !now.Before(state.Managed.Expiry) {
+		} else if containsLifecycleAction(decision.Actions, execution.ActionCancelExpired) || containsLifecycleAction(decision.Actions, execution.ActionCloseExpired) {
 			err = state.Managed.OnExpiry(a.liveExecutor, position, mark)
 			changed = err == nil
 		}
@@ -478,6 +527,30 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		}
 	}
 	return nil
+}
+
+func managedLifecycleState(trade *execution.ManagedTrade) execution.LifecycleState {
+	state := execution.LifecycleState{FillPrice: trade.Fill, ActiveStop: trade.Stop}
+	switch trade.State {
+	case execution.ProtectionInitial:
+		state.Phase = execution.LifecycleInitial
+	case execution.ProtectionRunner:
+		state.Phase, state.TP1Hit, state.ActiveStop = execution.LifecycleRunner, true, trade.Fill
+	case execution.ProtectionClosed:
+		state.Phase = execution.LifecycleClosed
+	default:
+		state.Phase = execution.LifecycleWaiting
+	}
+	return state
+}
+
+func containsLifecycleAction(actions []execution.LifecycleAction, wanted execution.LifecycleAction) bool {
+	for _, action := range actions {
+		if action == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func cycle1EntryAuthorized(now time.Time) bool {
@@ -621,7 +694,7 @@ func (a *app) persistLiveJournal(snapshot live.MarketSnapshot, asset universe.As
 	case execution.ProtectionClosed:
 		paperState, outcome = execution.PaperClosed, "CLOSED"
 	}
-	record := journal.FromLive(snapshot, asset.MarketSymbol(), strategyVersion, state.Order, journal.LiveExecution{OrderID: state.Managed.EntryOrderID, State: string(paperState), Outcome: outcome, ActualFill: state.Managed.Fill, TP1Hit: state.Managed.State == execution.ProtectionRunner || state.Managed.State == execution.ProtectionClosed})
+	record := journal.FromLive(snapshot, asset.MarketSymbol(), strategyVersion, state.Order, journal.LiveExecution{OrderID: state.Managed.EntryOrderID, State: string(paperState), Outcome: outcome, ActualFill: state.Managed.Fill, TP1Hit: state.Managed.State == execution.ProtectionRunner || state.Managed.State == execution.ProtectionClosed, RuntimeVersion: state.LifecycleVersion})
 	record.ID, record.SessionID, record.OpportunityID, record.StrategyOrderID = state.TradeID, state.SessionID, state.OpportunityID, state.StrategyOrderID
 	record.RunID = "run_live_" + strategyVersion + "_" + snapshot.SessionDate.Format("20060102")
 	return a.events.Append("trade_journal", record)

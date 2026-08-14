@@ -26,6 +26,7 @@ type TradeRecord struct {
 	Mode             string               `json:"mode"`
 	Classification   string               `json:"classification"`
 	StrategyVersion  string               `json:"strategy_version"`
+	RuntimeVersion   string               `json:"runtime_version"`
 	Market           live.MarketSnapshot  `json:"market"`
 	Order            execution.Order      `json:"order"`
 	State            execution.PaperState `json:"state"`
@@ -44,24 +45,25 @@ type TradeRecord struct {
 }
 
 type LiveExecution struct {
-	OrderID    string
-	State      string
-	Outcome    string
-	ActualFill float64
-	ExitPrice  float64
-	RMultiple  float64
-	MFE        float64
-	MAE        float64
-	TP1Hit     bool
+	OrderID        string
+	State          string
+	Outcome        string
+	ActualFill     float64
+	ExitPrice      float64
+	RMultiple      float64
+	MFE            float64
+	MAE            float64
+	TP1Hit         bool
+	RuntimeVersion string
 }
 
 func FromPaper(snapshot live.MarketSnapshot, exchangeSymbol, version string, trade execution.PaperTrade) TradeRecord {
 	risk := math.Abs(trade.Order.Price - trade.Order.Stop)
 	record := TradeRecord{
-		SchemaVersion: 1, ID: snapshot.SessionDate.Format("20060102") + "-" + snapshot.Symbol + "-PAPER",
+		SchemaVersion: 2, ID: snapshot.SessionDate.Format("20060102") + "-" + snapshot.Symbol + "-PAPER",
 		RecordedAt: time.Now().UTC(), SessionDate: snapshot.SessionDate, Symbol: snapshot.Symbol,
 		ExchangeSymbol: exchangeSymbol, Mode: "PAPER_EXECUTION", Classification: snapshot.Classification,
-		StrategyVersion: version, Market: snapshot, Order: trade.Order, State: trade.State,
+		StrategyVersion: version, RuntimeVersion: trade.LifecycleVersion, Market: snapshot, Order: trade.Order, State: trade.State,
 		Outcome: trade.Outcome, PlannedEntry: trade.Order.Price, ActualFill: trade.FillPrice,
 		ExitPrice: trade.ExitPrice, RMultiple: trade.RMultiple, MFE: trade.MFE, MAE: trade.MAE, TP1Hit: trade.TP1Hit,
 	}
@@ -80,10 +82,10 @@ func FromPaper(snapshot live.MarketSnapshot, exchangeSymbol, version string, tra
 func FromLive(snapshot live.MarketSnapshot, exchangeSymbol, version string, order execution.Order, facts LiveExecution) TradeRecord {
 	risk := math.Abs(order.Price - order.Stop)
 	record := TradeRecord{
-		SchemaVersion: 1, ID: snapshot.SessionDate.Format("20060102") + "-" + snapshot.Symbol + "-LIVE-" + facts.OrderID,
+		SchemaVersion: 2, ID: snapshot.SessionDate.Format("20060102") + "-" + snapshot.Symbol + "-LIVE-" + facts.OrderID,
 		RecordedAt: time.Now().UTC(), SessionDate: snapshot.SessionDate, Symbol: snapshot.Symbol,
 		ExchangeSymbol: exchangeSymbol, Mode: "LIVE_EXECUTION", Classification: snapshot.Classification,
-		StrategyVersion: version, Market: snapshot, Order: order, State: execution.PaperState(facts.State),
+		StrategyVersion: version, RuntimeVersion: facts.RuntimeVersion, Market: snapshot, Order: order, State: execution.PaperState(facts.State),
 		Outcome: facts.Outcome, PlannedEntry: order.Price, ActualFill: facts.ActualFill,
 		ExitPrice: facts.ExitPrice, RMultiple: facts.RMultiple, MFE: facts.MFE, MAE: facts.MAE, TP1Hit: facts.TP1Hit,
 	}
