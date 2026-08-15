@@ -1,21 +1,31 @@
 [Unit]
 Description=Overnight Strategy - continuous paper and gated live lifecycle
 After=network-online.target lightercollector.service
-Wants=network-online.target
-Requires=lightercollector.service
+Wants=network-online.target lightercollector.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=traderbot
 Group=traderbot
-WorkingDirectory=/opt/overnight-strategy
+WorkingDirectory=/opt/overnight-strategy/current
 EnvironmentFile=-/etc/overnight.env
 EnvironmentFile=-/etc/overnight-strategy.env
 EnvironmentFile=-/etc/overnight-lighter.env
-ExecStart=/opt/overnight-strategy/build/traderuntime -store /mnt/trading/research -live=true -poll=5s
+EnvironmentFile=-/etc/overnight/runtime.env
+ExecStart=/opt/overnight-strategy/current/bin/traderuntime -store /mnt/trading/research -live=true -poll=5s
 Restart=always
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=90
+KillSignal=SIGTERM
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/trading /var/lib/overnight
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

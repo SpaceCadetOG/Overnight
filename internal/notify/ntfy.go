@@ -3,6 +3,8 @@ package notify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +23,14 @@ type Client struct {
 	telegramChatID   string
 	http             *http.Client
 	pollHTTP         *http.Client
+	receipts         interface{ Append(string, any) error }
+}
+
+func (c *Client) WithReceiptStore(store interface{ Append(string, any) error }) *Client {
+	if c != nil {
+		c.receipts = store
+	}
+	return c
 }
 
 func FromEnvironment() *Client {
@@ -63,16 +73,36 @@ func (c *Client) Send(ctx context.Context, title, message, priority, tags string
 	}
 	var firstErr error
 	if c.endpoint != "" {
-		if err := c.sendNtfy(ctx, title, message, priority, tags); err != nil {
+		if err := c.sendTracked(ctx, "ntfy", title, message, func() error { return c.sendNtfy(ctx, title, message, priority, tags) }); err != nil {
 			firstErr = err
 		}
 	}
 	if c.telegramEndpoint != "" && c.telegramChatID != "" {
-		if err := c.sendTelegram(ctx, title, message); err != nil && firstErr == nil {
+		if err := c.sendTracked(ctx, "telegram", title, message, func() error { return c.sendTelegram(ctx, title, message) }); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+func (c *Client) sendTracked(ctx context.Context, sink, title, message string, deliver func() error) error {
+	h := sha256.Sum256([]byte(title + "\n" + message))
+	id := "report_" + hex.EncodeToString(h[:12])
+	now := time.Now().UTC()
+	if c.receipts != nil {
+		_ = c.receipts.Append("report_deliveries", map[string]any{"schema_version": 1, "report_id": id, "sink": sink, "payload_hash": hex.EncodeToString(h[:]), "state": "ATTEMPTED", "attempted_at": now})
+	}
+	err := deliver()
+	state := "DELIVERED"
+	record := map[string]any{"schema_version": 1, "report_id": id, "sink": sink, "payload_hash": hex.EncodeToString(h[:]), "state": state, "attempted_at": now, "completed_at": time.Now().UTC()}
+	if err != nil {
+		record["state"] = "FAILED"
+		record["error"] = err.Error()
+	}
+	if c.receipts != nil {
+		_ = c.receipts.Append("report_deliveries", record)
+	}
+	return err
 }
 
 func (c *Client) sendNtfy(ctx context.Context, title, message, priority, tags string) error {
@@ -194,7 +224,7 @@ func (c *Client) PollTelegramCommands(ctx context.Context, handler func(context.
 			}
 			title, message := handler(ctx, command)
 			if title != "" {
-				_ = c.sendTelegram(ctx, title, message)
+				_ = c.sendTracked(ctx, "telegram", title, message, func() error { return c.sendTelegram(ctx, title, message) })
 			}
 		}
 	}

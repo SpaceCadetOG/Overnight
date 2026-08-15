@@ -52,6 +52,9 @@ func TestFrozenLifecycleLongAndShort(t *testing.T) {
 		if err := trade.OnTP1Filled(exec); err != nil || len(exec.orders) != 4 {
 			t.Fatal("TP1 handling is not idempotent")
 		}
+		if trade.BreakevenPromotedAt.IsZero() || !trade.BreakevenPromotedAt.Equal(trade.TP1ReconciledAt) {
+			t.Fatalf("missing durable TP1/breakeven evidence: %+v", trade)
+		}
 	}
 }
 

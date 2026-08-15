@@ -1,0 +1,7 @@
+[Unit]
+Description=Overnight Strategy - planning, reporting, and archive timers
+Wants=dailyplans.timer dailylevels.timer eodexport.timer dailyreport.timer lighterarchive.timer
+After=overnight-recorder.target
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,7 @@ import (
 
 // LifecycleVersion changes only when runtime transition behavior changes. The
 // frozen strategy version remains independent from runtime correctness fixes.
-const LifecycleVersion = "overnight-lifecycle-v2.0.0"
+const LifecycleVersion = "overnight-lifecycle-v2.0.1"
 
 type LifecyclePhase string
 
@@ -136,11 +136,14 @@ func EvaluateOvernightLifecycle(plan LifecyclePlan, state LifecycleState, in Lif
 	}
 	if in.PositionClosed {
 		decision.State.Phase = LifecycleClosed
-		decision.Outcome = "CLOSED"
+		decision.Outcome = "RECONCILED_FLAT"
 		decision.Actions = append(decision.Actions, ActionReconcileClosed)
 		return decision, nil
 	}
 	if expired {
+		if in.Mark <= 0 {
+			return LifecycleDecision{}, fmt.Errorf("positive mark is required to expire an open position")
+		}
 		decision.State.Phase = LifecycleClosed
 		decision.Outcome, decision.ExitPrice = "EXPIRY", in.Mark
 		decision.Actions = append(decision.Actions, ActionCloseExpired)

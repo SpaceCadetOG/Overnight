@@ -82,6 +82,35 @@ func TestLifecyclePlanIsNotReinterpreted(t *testing.T) {
 	}
 }
 
+func TestOpenPositionExpiryRejectsZeroMark(t *testing.T) {
+	at := time.Date(2026, 8, 10, 21, 0, 1, 0, time.UTC)
+	plan := LifecyclePlan{StrategyOrderID: "strategy-1", Symbol: "BTC", Side: "BUY", Entry: 100, Stop: 99, TP1: 101, TP2: 103, ExpiresAt: at.Add(-time.Second), TP1Fraction: .5, MoveToBEAfterTP1: true}
+	state := LifecycleState{Phase: LifecycleInitial, FillPrice: 100, ActiveStop: 99}
+	decision, err := EvaluateOvernightLifecycle(plan, state, LifecycleInput{At: at, Expired: true})
+	if err == nil || decision.State.Phase == LifecycleClosed {
+		t.Fatalf("zero-mark expiry must be rejected without closing: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestExpiredWaitingEntryDoesNotRequireMark(t *testing.T) {
+	at := time.Date(2026, 8, 10, 21, 0, 1, 0, time.UTC)
+	plan := LifecyclePlan{StrategyOrderID: "strategy-1", Symbol: "BTC", Side: "BUY", Entry: 100, Stop: 99, TP1: 101, TP2: 103, ExpiresAt: at.Add(-time.Second), TP1Fraction: .5, MoveToBEAfterTP1: true}
+	decision, err := EvaluateOvernightLifecycle(plan, LifecycleState{Phase: LifecycleWaiting}, LifecycleInput{At: at, Expired: true})
+	if err != nil || decision.State.Phase != LifecycleNoFill || decision.Outcome != "NO_FILL" {
+		t.Fatalf("waiting expiry=%+v err=%v", decision, err)
+	}
+}
+
+func TestAuthenticatedFlatReconcilesLocalOpenState(t *testing.T) {
+	at := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	plan := LifecyclePlan{StrategyOrderID: "strategy-1", Symbol: "BTC", Side: "BUY", Entry: 100, Stop: 99, TP1: 101, TP2: 103, ExpiresAt: at.Add(time.Hour), TP1Fraction: .5, MoveToBEAfterTP1: true}
+	state := LifecycleState{Phase: LifecycleInitial, FillPrice: 100, ActiveStop: 99}
+	decision, err := EvaluateOvernightLifecycle(plan, state, LifecycleInput{At: at, Mark: 100.5, PositionClosed: true})
+	if err != nil || decision.State.Phase != LifecycleClosed || decision.Outcome != "RECONCILED_FLAT" || len(decision.Actions) != 1 || decision.Actions[0] != ActionReconcileClosed {
+		t.Fatalf("authenticated-flat decision=%+v err=%v", decision, err)
+	}
+}
+
 func assertActionsEqual(t *testing.T, left, right []LifecycleAction) {
 	t.Helper()
 	if len(left) != len(right) {

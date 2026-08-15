@@ -4,7 +4,8 @@ Description=Overnight Strategy - Daily Lighter archive lifecycle
 [Timer]
 OnCalendar=*-*-* 00:15:00 America/Chicago
 Persistent=true
-RandomizedDelaySec=120
+RandomizedDelaySec=0
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

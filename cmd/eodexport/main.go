@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ogtrading/overnight-strategy/internal/buildinfo"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	"github.com/ogtrading/overnight-strategy/internal/forensics"
 	"github.com/ogtrading/overnight-strategy/internal/journal"
@@ -31,6 +32,10 @@ type exportRow struct {
 	Journal        journal.TradeRecord          `json:"journal"`
 	Checkpoints    forensics.CheckpointManifest `json:"checkpoints"`
 }
+type quarantineRow struct {
+	Journal journal.TradeRecord `json:"journal"`
+	Reason  string              `json:"reason"`
+}
 type quality struct {
 	SchemaVersion int      `json:"schema_version"`
 	Date          string   `json:"date"`
@@ -38,6 +43,7 @@ type quality struct {
 	Expected      int      `json:"expected"`
 	Journals      int      `json:"journals"`
 	Opportunities int      `json:"opportunities"`
+	Quarantined   int      `json:"quarantined"`
 	Issues        []string `json:"issues,omitempty"`
 }
 
@@ -78,6 +84,9 @@ func main() {
 		if r.SessionDate.In(loc).Format("2006-01-02") != date.Format("2006-01-02") {
 			continue
 		}
+		if r.Mode != "PAPER_EXECUTION" {
+			continue
+		}
 		if old, ok := latest[r.Symbol]; !ok || r.RecordedAt.After(old.RecordedAt) {
 			latest[r.Symbol] = r
 		}
@@ -99,14 +108,18 @@ func main() {
 		q.Issues = append(q.Issues, fmt.Sprintf("journal coverage %d/%d", len(latest), len(universe.All())))
 	}
 	rows := []exportRow{}
+	quarantined := []quarantineRow{}
 	datasetVersion := "dataset_" + date.Format("20060102") + "_baseline-v1-20260810_v1"
 	for _, asset := range universe.All() {
 		r, ok := latest[asset.Symbol]
 		if !ok {
 			continue
 		}
-		if r.SchemaVersion != 1 || r.SessionID == "" || r.OpportunityID == "" || r.StrategyOrderID == "" || r.RunID == "" {
-			q.Issues = append(q.Issues, asset.Symbol+": incomplete identity/schema")
+		if validationErr := r.ValidateForResearch(); validationErr != nil {
+			q.Quarantined++
+			q.Issues = append(q.Issues, asset.Symbol+": QUARANTINED: "+validationErr.Error())
+			quarantined = append(quarantined, quarantineRow{Journal: r, Reason: validationErr.Error()})
+			continue
 		}
 		caseEvents := byOpp[r.OpportunityID]
 		c, caseErr := forensics.BuildCase(caseEvents)
@@ -128,6 +141,7 @@ func main() {
 		fatal(err)
 	}
 	write(filepath.Join(dir, "ml_rows.jsonl"), rows)
+	write(filepath.Join(dir, "quarantined_trade_records.jsonl"), quarantined)
 	write(filepath.Join(dir, "lifecycle_events.jsonl"), filteredEvents(events, date))
 	write(filepath.Join(dir, "paper_trades.jsonl"), filteredTrades(trades, date, loc))
 	write(filepath.Join(dir, "data_quality.json"), q)
@@ -136,13 +150,14 @@ func main() {
 		q.Passed = false
 		write(filepath.Join(dir, "data_quality.json"), q)
 	}
-	manifest := map[string]any{"schema_version": 1, "dataset_version": datasetVersion, "strategy_version": "baseline-v1-20260810", "market_map_schema_version": 1, "trade_journal_schema_version": 1, "event_schema_version": forensics.SchemaVersion, "checkpoint_schema_version": forensics.CheckpointSchemaVersion, "code_version": "cycle1-baseline-v1-20260810", "created_at": time.Now().UTC(), "shadow_only": true, "files": fileHashes(dir), "data_quality_pass": q.Passed}
+	manifest := map[string]any{"schema_version": 1, "dataset_version": datasetVersion, "strategy_version": "baseline-v1-20260810", "runtime_version": execution.LifecycleVersion, "market_map_schema_version": 1, "trade_journal_schema_version": 2, "event_schema_version": forensics.SchemaVersion, "checkpoint_schema_version": forensics.CheckpointSchemaVersion, "code_version": buildinfo.Version, "code_commit": buildinfo.Commit, "created_at": time.Now().UTC(), "shadow_only": true, "files": fileHashes(dir), "data_quality_pass": q.Passed, "quarantined_records": q.Quarantined}
 	write(filepath.Join(dir, "manifest.json"), manifest)
 	b, _ := json.Marshal(map[string]any{"status": map[bool]string{true: "PASS", false: "FAIL"}[q.Passed], "package": dir, "rows": len(rows), "issues": q.Issues})
 	fmt.Println(string(b))
 	status := map[bool]string{true: "PASS", false: "FAIL"}[q.Passed]
 	report := journal.BuildDaily(journals, date, len(universe.All()))
-	notifier := notify.FromEnvironment()
+	receipts, _ := store.NewJSONL(*root)
+	notifier := notify.FromEnvironment().WithReceiptStore(receipts)
 	if !notifier.Enabled() {
 		fmt.Fprintln(os.Stderr, "EOD notification not sent: ntfy and Telegram are not configured")
 	} else if err := notifier.Send(context.Background(), "Overnight EOD "+status, eodMessage(report, status, len(q.Issues)), map[bool]string{true: "default", false: "urgent"}[q.Passed], "clipboard,bar_chart"); err != nil {
@@ -191,6 +206,12 @@ func write(path string, value any) {
 	defer f.Close()
 	enc := json.NewEncoder(f)
 	if rows, ok := value.([]exportRow); ok {
+		for _, row := range rows {
+			if e = enc.Encode(row); e != nil {
+				fatal(e)
+			}
+		}
+	} else if rows, ok := value.([]quarantineRow); ok {
 		for _, row := range rows {
 			if e = enc.Encode(row); e != nil {
 				fatal(e)

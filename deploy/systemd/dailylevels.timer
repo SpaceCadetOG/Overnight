@@ -1,0 +1,12 @@
+[Unit]
+Description=Overnight Strategy - generate daily levels after candle close
+
+[Timer]
+OnCalendar=*-*-* 05:06:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=0
+AccuracySec=1s
+Unit=dailylevels.service
+
+[Install]
+WantedBy=timers.target

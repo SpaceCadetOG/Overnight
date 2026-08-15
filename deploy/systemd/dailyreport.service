@@ -1,0 +1,16 @@
+[Unit]
+Description=Overnight Strategy - daily control report
+After=eodexport.service
+
+[Service]
+Type=oneshot
+User=traderbot
+Group=traderbot
+EnvironmentFile=-/etc/overnight/runtime.env
+ExecStart=/opt/overnight-strategy/current/scripts/generate-daily-report.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/trading /var/lib/overnight
+UMask=0077

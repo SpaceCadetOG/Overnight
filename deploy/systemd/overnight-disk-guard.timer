@@ -1,0 +1,12 @@
+[Unit]
+Description=Overnight Strategy - check trading disk every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=5s
+Persistent=true
+Unit=overnight-disk-guard.service
+
+[Install]
+WantedBy=timers.target

@@ -83,7 +83,7 @@ jobs:
         run: go mod download
 
       - name: Create output directory
-        run: mkdir -p dist/linux-arm64
+        run: mkdir -p dist/linux-arm64/bin
 
       - name: Build production binaries
         run: |
@@ -100,20 +100,42 @@ jobs:
             lighterexecutor \
             traderuntime \
             dailylevels \
-            researchreport
+            dailyreport \
+            researchreport \
+            recordercert
           do
-            go build -trimpath -ldflags="$LDFLAGS" -o "dist/linux-arm64/$binary" "./cmd/$binary"
+            go build -trimpath -ldflags="$LDFLAGS" -o "dist/linux-arm64/bin/$binary" "./cmd/$binary"
           done
+
+      - name: Generate immutable build metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > dist/linux-arm64/BUILD.json <<EOF
+          {
+            "repository": "${GITHUB_REPOSITORY}",
+            "commit": "${GITHUB_SHA}",
+            "ref": "${GITHUB_REF_NAME}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "built_at": "$(date -u +%FT%TZ)",
+            "go_version": "$(go version | awk '{print $3}')",
+            "target": "linux/arm64",
+            "dirty": false,
+            "state_schema_version": 1
+          }
+          EOF
 
       - name: Generate checksums
         shell: bash
         run: |
           set -euo pipefail
           cd dist/linux-arm64
-          mkdir -p systemd scripts
-          cp ../../deploy/systemd/*.service ../../deploy/systemd/*.timer systemd/
-          cp ../../scripts/archive-and-upload.sh scripts/
-          chmod 0755 scripts/archive-and-upload.sh
+          mkdir -p systemd scripts journald
+          cp ../../deploy/systemd/*.service ../../deploy/systemd/*.timer ../../deploy/systemd/*.target systemd/
+          cp ../../deploy/journald/overnight.conf journald/
+          cp ../../scripts/activate-release.sh ../../scripts/archive-and-upload.sh ../../scripts/check-recorder-health.sh ../../scripts/check-trading-disk.sh ../../scripts/generate-daily-report.sh scripts/
+          chmod 0755 scripts/*.sh bin/*
           find . -type f ! -name SHA256SUMS -print0 \
             | sort -z \
             | xargs -0 sha256sum \
@@ -156,4 +178,4 @@ jobs:
         run: sha256sum --check SHA256SUMS
 
       - name: Deploy atomically and verify health
-        run: scripts/deploy-tradepi.sh dist/linux-arm64 "${GITHUB_SHA}"
+        run: scripts/deploy-tradepi.sh dist/linux-arm64 "${GITHUB_SHA}" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

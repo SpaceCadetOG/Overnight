@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ogtrading/overnight-strategy/internal/buildinfo"
+	"github.com/ogtrading/overnight-strategy/internal/recordercert"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
 
@@ -33,26 +34,27 @@ type fileManifest struct {
 }
 
 type manifest struct {
-	Schema           int            `json:"schema_version"`
-	PackageID        string         `json:"package_id"`
-	PriorPackageID   string         `json:"prior_package_id,omitempty"`
-	CollectorVersion string         `json:"collector_version"`
-	CollectorCommit  string         `json:"collector_commit"`
-	Exchange         string         `json:"exchange"`
-	Date             string         `json:"date"`
-	Timezone         string         `json:"timezone"`
-	GeneratedAt      time.Time      `json:"generated_at"`
-	Files            []fileManifest `json:"files"`
-	Records          uint64         `json:"records"`
-	RawBytes         int64          `json:"raw_bytes"`
-	NonceGaps        uint64         `json:"nonce_gaps"`
-	WSErrors         uint64         `json:"websocket_errors"`
-	Reconnects       uint64         `json:"reconnects"`
-	FirstEvent       time.Time      `json:"first_event,omitempty"`
-	LastEvent        time.Time      `json:"last_event,omitempty"`
-	Assets           []string       `json:"assets"`
-	Missing          []string       `json:"missing_assets,omitempty"`
-	Complete         bool           `json:"complete"`
+	Schema            int            `json:"schema_version"`
+	PackageID         string         `json:"package_id"`
+	PriorPackageID    string         `json:"prior_package_id,omitempty"`
+	CollectorVersion  string         `json:"collector_version"`
+	CollectorCommit   string         `json:"collector_commit"`
+	Exchange          string         `json:"exchange"`
+	Date              string         `json:"date"`
+	Timezone          string         `json:"timezone"`
+	GeneratedAt       time.Time      `json:"generated_at"`
+	Files             []fileManifest `json:"files"`
+	Records           uint64         `json:"records"`
+	RawBytes          int64          `json:"raw_bytes"`
+	NonceGaps         uint64         `json:"nonce_gaps"`
+	WSErrors          uint64         `json:"websocket_errors"`
+	Reconnects        uint64         `json:"reconnects"`
+	FirstEvent        time.Time      `json:"first_event,omitempty"`
+	LastEvent         time.Time      `json:"last_event,omitempty"`
+	Assets            []string       `json:"assets"`
+	Missing           []string       `json:"missing_assets,omitempty"`
+	Complete          bool           `json:"complete"`
+	RecorderCertified bool           `json:"recorder_certified"`
 }
 
 func expectedAssets() []string {
@@ -94,7 +96,7 @@ func main() {
 		}
 		fatal(fmt.Errorf("no JSONL files in %s", dir))
 	}
-	m := manifest{Schema: 2, PackageID: "lighter-" + *day, Exchange: "lighter", Date: *day, Timezone: location.String(), GeneratedAt: time.Now().UTC(), CollectorVersion: buildinfo.Version, CollectorCommit: buildinfo.Commit}
+	m := manifest{Schema: 3, PackageID: "lighter-" + *day, Exchange: "lighter", Date: *day, Timezone: location.String(), GeneratedAt: time.Now().UTC(), CollectorVersion: buildinfo.Version, CollectorCommit: buildinfo.Commit}
 	seenAssets := map[string]bool{}
 	seenBooks := map[string]bool{}
 	for _, path := range entries {
@@ -156,7 +158,19 @@ func main() {
 	dayStart := parsed
 	dayEnd := parsed.AddDate(0, 0, 1)
 	coverageComplete := !m.FirstEvent.IsZero() && !m.FirstEvent.After(dayStart.Add(5*time.Minute)) && !m.LastEvent.Before(dayEnd.Add(-5*time.Minute))
-	m.Complete = len(m.Missing) == 0 && m.NonceGaps == 0 && m.WSErrors == 0 && coverageComplete
+	certificate, certErr := recordercert.Certify(dir, expectedAssets())
+	if certErr == nil {
+		body, _ := json.MarshalIndent(certificate, "", "  ")
+		body = append(body, '\n')
+		certPath := filepath.Join(dir, "RECORDER_CERTIFICATE.json")
+		if err := os.WriteFile(certPath, body, 0640); err != nil {
+			fatal(err)
+		}
+		digest, _ := checksum(certPath)
+		m.Files = append(m.Files, fileManifest{Path: "RECORDER_CERTIFICATE.json", Compressed: int64(len(body)), RawBytes: int64(len(body)), Records: 1, SHA256: digest})
+		m.RecorderCertified = certificate.Pass
+	}
+	m.Complete = len(m.Missing) == 0 && m.NonceGaps == 0 && m.WSErrors == 0 && coverageComplete && m.RecorderCertified && certErr == nil && m.CollectorCommit != "" && m.CollectorCommit != "unknown"
 	if err := writeOutputs(dir, m); err != nil {
 		fatal(err)
 	}

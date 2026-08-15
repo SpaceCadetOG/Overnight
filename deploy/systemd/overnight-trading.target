@@ -1,0 +1,7 @@
+[Unit]
+Description=Overnight Strategy - trading runtime
+Wants=traderuntime.service
+After=overnight-recorder.target
+
+[Install]
+WantedBy=multi-user.target

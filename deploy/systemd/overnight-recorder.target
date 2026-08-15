@@ -1,0 +1,7 @@
+[Unit]
+Description=Overnight Strategy - recorder services
+Wants=lightercollector.service overnight-health.timer overnight-disk-guard.timer
+After=local-fs.target
+
+[Install]
+WantedBy=multi-user.target

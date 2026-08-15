@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	lighterclient "github.com/elliottech/lighter-go/client"
@@ -41,16 +42,28 @@ type Market struct {
 }
 
 type Snapshot struct {
-	Account   map[string]any
-	Orders    []map[string]any
-	Fills     []map[string]any
-	Positions []map[string]any
+	Account          map[string]any            `json:"account"`
+	Orders           []map[string]any          `json:"active_orders"`
+	HistoricalOrders []map[string]any          `json:"historical_orders"`
+	Fills            []map[string]any          `json:"fills"`
+	FundingPayments  []map[string]any          `json:"funding_payments"`
+	Positions        []map[string]any          `json:"positions"`
+	Endpoints        map[string]EndpointStatus `json:"endpoints"`
+}
+
+type EndpointStatus struct {
+	State       string    `json:"state"`
+	RetrievedAt time.Time `json:"retrieved_at,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type Client struct {
-	cfg    Config
-	http   *http.Client
-	signer *lighterclient.TxClient
+	cfg                                          Config
+	http                                         *http.Client
+	signer                                       *lighterclient.TxClient
+	mu                                           sync.Mutex
+	cachedFills, cachedHistorical, cachedFunding []map[string]any
+	fillsAt, historicalAt, fundingAt             time.Time
 }
 
 func CheckPublic(ctx context.Context, baseURL string) ([]Market, error) {
@@ -109,36 +122,48 @@ func (c *Client) authToken() (string, error) {
 }
 
 func (c *Client) ReadSnapshot(ctx context.Context, markets []Market) (Snapshot, error) {
+	snapshot, err := c.ReadReconciliationSnapshot(ctx, markets)
+	if err != nil {
+		return snapshot, err
+	}
+	return snapshot, nil
+}
+
+// ReadReconciliationSnapshot independently scores the four authoritative
+// endpoint groups. A failed endpoint is never represented as a fresh empty
+// collection. Expensive fill/history endpoints are refreshed at most once per
+// minute and remain usable for two minutes.
+func (c *Client) ReadReconciliationSnapshot(ctx context.Context, markets []Market) (Snapshot, error) {
 	token, err := c.authToken()
 	if err != nil {
 		return Snapshot{}, err
 	}
+	now := time.Now().UTC()
+	snapshot := Snapshot{Endpoints: map[string]EndpointStatus{}}
+	failures := []string{}
 	accountIndex := strconv.FormatInt(c.cfg.AccountIndex, 10)
 	var accounts struct {
 		Accounts []map[string]any `json:"accounts"`
 	}
 	if err := c.get(ctx, "/api/v1/account", url.Values{"by": {"index"}, "value": {accountIndex}}, "", &accounts); err != nil {
-		return Snapshot{}, err
-	}
-	if len(accounts.Accounts) == 0 {
-		return Snapshot{}, fmt.Errorf("Lighter account %d not found", c.cfg.AccountIndex)
-	}
-	snapshot := Snapshot{Account: accounts.Accounts[0]}
-	if positions, ok := accounts.Accounts[0]["positions"].([]any); ok {
-		for _, value := range positions {
-			if position, ok := value.(map[string]any); ok {
-				snapshot.Positions = append(snapshot.Positions, position)
+		snapshot.Endpoints["positions"] = EndpointStatus{State: "failed", Error: err.Error()}
+		failures = append(failures, "positions")
+	} else if len(accounts.Accounts) == 0 {
+		snapshot.Endpoints["positions"] = EndpointStatus{State: "failed", Error: "account not found"}
+		failures = append(failures, "positions")
+	} else {
+		snapshot.Account = accounts.Accounts[0]
+		if positions, ok := accounts.Accounts[0]["positions"].([]any); ok {
+			for _, value := range positions {
+				if position, ok := value.(map[string]any); ok {
+					snapshot.Positions = append(snapshot.Positions, position)
+				}
 			}
 		}
+		snapshot.Endpoints["positions"] = EndpointStatus{State: "fresh", RetrievedAt: now}
 	}
-	var trades struct {
-		Trades []map[string]any `json:"trades"`
-	}
-	tradeQuery := url.Values{"market_id": {"255"}, "market_type": {"all"}, "account_index": {accountIndex}, "sort_by": {"timestamp"}, "sort_dir": {"desc"}, "limit": {"100"}}
-	if err := c.get(ctx, "/api/v1/trades", tradeQuery, token, &trades); err != nil {
-		return Snapshot{}, err
-	}
-	snapshot.Fills = trades.Trades
+
+	activeOK := true
 	for _, market := range markets {
 		if strings.EqualFold(market.Status, "inactive") {
 			continue
@@ -148,11 +173,110 @@ func (c *Client) ReadSnapshot(ctx context.Context, markets []Market) (Snapshot, 
 		}
 		query := url.Values{"account_index": {accountIndex}, "market_id": {strconv.Itoa(int(market.MarketID))}, "auth": {token}}
 		if err := c.get(ctx, "/api/v1/accountActiveOrders", query, "", &orders); err != nil {
-			return Snapshot{}, err
+			activeOK = false
+			failures = append(failures, "active_orders")
+			snapshot.Endpoints["active_orders"] = EndpointStatus{State: "failed", Error: err.Error()}
+			break
 		}
 		snapshot.Orders = append(snapshot.Orders, orders.Orders...)
 	}
+	if activeOK {
+		snapshot.Endpoints["active_orders"] = EndpointStatus{State: "fresh", RetrievedAt: now}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fillsAt.IsZero() || now.Sub(c.fillsAt) >= time.Minute {
+		var trades struct {
+			Trades []map[string]any `json:"trades"`
+		}
+		query := url.Values{"market_id": {"255"}, "market_type": {"all"}, "account_index": {accountIndex}, "sort_by": {"timestamp"}, "sort_dir": {"desc"}, "limit": {"100"}}
+		if err := c.get(ctx, "/api/v1/trades", query, token, &trades); err != nil {
+			if c.fillsAt.IsZero() || now.Sub(c.fillsAt) > 2*time.Minute {
+				snapshot.Endpoints["fills"] = EndpointStatus{State: "failed", Error: err.Error()}
+				failures = append(failures, "fills")
+			} else {
+				snapshot.Endpoints["fills"] = EndpointStatus{State: "stale", RetrievedAt: c.fillsAt, Error: err.Error()}
+				failures = append(failures, "fills")
+			}
+		} else {
+			c.cachedFills, c.fillsAt = trades.Trades, now
+		}
+	}
+	snapshot.Fills = append(snapshot.Fills, c.cachedFills...)
+	if _, ok := snapshot.Endpoints["fills"]; !ok {
+		snapshot.Endpoints["fills"] = EndpointStatus{State: "fresh", RetrievedAt: c.fillsAt}
+	}
+
+	if c.historicalAt.IsZero() || now.Sub(c.historicalAt) >= time.Minute {
+		historical := []map[string]any{}
+		historyOK := true
+		var historyErr error
+		for _, market := range markets {
+			var orders struct {
+				Orders []map[string]any `json:"orders"`
+			}
+			query := url.Values{"account_index": {accountIndex}, "market_id": {strconv.Itoa(int(market.MarketID))}, "auth": {token}}
+			if err := c.get(ctx, "/api/v1/accountInactiveOrders", query, "", &orders); err != nil {
+				historyOK = false
+				historyErr = err
+				break
+			}
+			historical = append(historical, orders.Orders...)
+		}
+		if historyOK {
+			c.cachedHistorical, c.historicalAt = historical, now
+		} else if c.historicalAt.IsZero() || now.Sub(c.historicalAt) > 2*time.Minute {
+			snapshot.Endpoints["historical_orders"] = EndpointStatus{State: "failed", Error: historyErr.Error()}
+			failures = append(failures, "historical_orders")
+		} else {
+			snapshot.Endpoints["historical_orders"] = EndpointStatus{State: "stale", RetrievedAt: c.historicalAt, Error: historyErr.Error()}
+			failures = append(failures, "historical_orders")
+		}
+	}
+	snapshot.HistoricalOrders = append(snapshot.HistoricalOrders, c.cachedHistorical...)
+	if _, ok := snapshot.Endpoints["historical_orders"]; !ok {
+		snapshot.Endpoints["historical_orders"] = EndpointStatus{State: "fresh", RetrievedAt: c.historicalAt}
+	}
+	if c.fundingAt.IsZero() || now.Sub(c.fundingAt) >= time.Minute {
+		var response struct {
+			PositionFundings []map[string]any `json:"position_fundings"`
+			Fundings         []map[string]any `json:"fundings"`
+		}
+		query := url.Values{"account_index": {accountIndex}, "limit": {"100"}, "side": {"all"}}
+		if err := c.get(ctx, "/api/v1/positionFunding", query, token, &response); err != nil {
+			if c.fundingAt.IsZero() || now.Sub(c.fundingAt) > 2*time.Minute {
+				snapshot.Endpoints["funding"] = EndpointStatus{State: "failed", Error: err.Error()}
+				failures = append(failures, "funding")
+			} else {
+				snapshot.Endpoints["funding"] = EndpointStatus{State: "stale", RetrievedAt: c.fundingAt, Error: err.Error()}
+				failures = append(failures, "funding")
+			}
+		} else {
+			c.cachedFunding = append(response.PositionFundings, response.Fundings...)
+			c.fundingAt = now
+		}
+	}
+	snapshot.FundingPayments = append(snapshot.FundingPayments, c.cachedFunding...)
+	if _, ok := snapshot.Endpoints["funding"]; !ok {
+		snapshot.Endpoints["funding"] = EndpointStatus{State: "fresh", RetrievedAt: c.fundingAt}
+	}
+	if len(failures) > 0 {
+		return snapshot, fmt.Errorf("authoritative reconciliation incomplete: %s", strings.Join(uniqueStrings(failures), ","))
+	}
 	return snapshot, nil
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (c *Client) CheckPrivateWebSocket(ctx context.Context) error {

@@ -1,0 +1,17 @@
+[Unit]
+Description=Overnight Strategy - recorder health gate
+After=lightercollector.service
+Wants=lightercollector.service
+
+[Service]
+Type=oneshot
+User=traderbot
+Group=traderbot
+EnvironmentFile=-/etc/overnight/runtime.env
+ExecStart=/opt/overnight-strategy/current/scripts/check-recorder-health.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/overnight
+UMask=0077

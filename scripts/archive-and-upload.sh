@@ -4,7 +4,7 @@ set -eu
 export TZ=America/Chicago
 root=${COLLECTOR_ROOT:-/mnt/trading/recorder/lighter}
 day=${1:-$(date -d yesterday +%F)}
-archive_bin=${COLLECTOR_ARCHIVE_BIN:-/opt/overnight-strategy/build/collectorarchive}
+archive_bin=${COLLECTOR_ARCHIVE_BIN:-/opt/overnight-strategy/current/bin/collectorarchive}
 
 # Keep source JSONL on TradePi. Compression and local validation are not
 # sufficient authority to delete recorder data; cloud acknowledgement is the

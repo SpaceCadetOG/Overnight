@@ -25,6 +25,8 @@ type Status struct {
 	Reconnects            uint64    `json:"reconnects"`
 	BooksReady            int       `json:"books_ready"`
 	Snapshots             uint64    `json:"snapshots"`
+	CrossedBooks          uint64    `json:"crossed_books"`
+	InvalidLevels         uint64    `json:"invalid_levels"`
 	ConfirmedLiquidations uint64    `json:"confirmed_liquidations"`
 	InferredCascades      uint64    `json:"inferred_liquidation_cascades"`
 }
@@ -38,6 +40,8 @@ type StatusView struct {
 	Reconnects            uint64    `json:"reconnects"`
 	BooksReady            int       `json:"books_ready"`
 	Snapshots             uint64    `json:"snapshots"`
+	CrossedBooks          uint64    `json:"crossed_books"`
+	InvalidLevels         uint64    `json:"invalid_levels"`
 	ConfirmedLiquidations uint64    `json:"confirmed_liquidations"`
 	InferredCascades      uint64    `json:"inferred_liquidation_cascades"`
 }
@@ -45,18 +49,19 @@ type StatusView struct {
 func (s *Status) Snapshot() StatusView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return StatusView{Connected: s.Connected, LastEvent: s.LastEvent, LastError: s.LastError, Events: s.Events, NonceGaps: s.NonceGaps, Reconnects: s.Reconnects, BooksReady: s.BooksReady, Snapshots: s.Snapshots, ConfirmedLiquidations: s.ConfirmedLiquidations, InferredCascades: s.InferredCascades}
+	return StatusView{Connected: s.Connected, LastEvent: s.LastEvent, LastError: s.LastError, Events: s.Events, NonceGaps: s.NonceGaps, Reconnects: s.Reconnects, BooksReady: s.BooksReady, Snapshots: s.Snapshots, CrossedBooks: s.CrossedBooks, InvalidLevels: s.InvalidLevels, ConfirmedLiquidations: s.ConfirmedLiquidations, InferredCascades: s.InferredCascades}
 }
 
 type Collector struct {
-	BaseURL   string
-	WSURL     string
-	Store     interface{ Append(string, any) error }
-	Status    *Status
-	lastNonce map[string]int64
-	books     map[string]*orderBook
-	marketIDs map[string]string
-	flow      *liquidationCorrelator
+	BaseURL        string
+	WSURL          string
+	Store          interface{ Append(string, any) error }
+	Status         *Status
+	lastNonce      map[string]int64
+	books          map[string]*orderBook
+	marketIDs      map[string]string
+	lastCheckpoint map[string]time.Time
+	flow           *liquidationCorrelator
 }
 
 type orderBook struct {
@@ -77,7 +82,7 @@ func New(baseURL, wsURL string, output interface{ Append(string, any) error }) *
 		}
 		wsURL += separator + "readonly=true"
 	}
-	return &Collector{BaseURL: baseURL, WSURL: wsURL, Store: output, Status: &Status{}, lastNonce: map[string]int64{}, books: map[string]*orderBook{}, marketIDs: map[string]string{}, flow: newLiquidationCorrelator()}
+	return &Collector{BaseURL: baseURL, WSURL: wsURL, Store: output, Status: &Status{}, lastNonce: map[string]int64{}, books: map[string]*orderBook{}, marketIDs: map[string]string{}, lastCheckpoint: map[string]time.Time{}, flow: newLiquidationCorrelator()}
 }
 
 func (c *Collector) Run(ctx context.Context) error {
@@ -88,6 +93,7 @@ func (c *Collector) Run(ctx context.Context) error {
 	for ctx.Err() == nil {
 		before := c.Status.Snapshot().Events
 		err := c.runOnce(ctx)
+		outageStarted := time.Now().UTC()
 		c.Status.mu.Lock()
 		c.Status.Connected = false
 		if err != nil && err != context.Canceled {
@@ -96,7 +102,6 @@ func (c *Collector) Run(ctx context.Context) error {
 		c.Status.Reconnects++
 		reconnects := c.Status.Reconnects
 		c.Status.mu.Unlock()
-		_ = c.Store.Append("collector_reconnects", map[string]any{"recorded_at": time.Now().UTC(), "reconnect": reconnects, "error": errorString(err)})
 		if c.Status.Snapshot().Events > before {
 			consecutiveFailures = 0
 		} else {
@@ -114,6 +119,8 @@ func (c *Collector) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(delay):
 		}
+		outageEnded := time.Now().UTC()
+		_ = c.Store.Append("collector_reconnects", map[string]any{"recorded_at": outageEnded, "outage_started_at": outageStarted, "outage_ended_at": outageEnded, "outage_duration_ms": outageEnded.Sub(outageStarted).Milliseconds(), "reconnect": reconnects, "error": errorString(err), "books_ready_after_disconnect": 0, "requires_fresh_snapshots": true})
 	}
 	return ctx.Err()
 }
@@ -143,6 +150,9 @@ func (c *Collector) runOnce(ctx context.Context) error {
 	c.Status.mu.Unlock()
 	c.books = map[string]*orderBook{}
 	c.lastNonce = map[string]int64{}
+	c.lastCheckpoint = map[string]time.Time{}
+	connectionStarted := time.Now().UTC()
+	_ = c.Store.Append("collector_connections", map[string]any{"recorded_at": connectionStarted, "connection_started_at": connectionStarted, "state": "RESYNCING", "books_ready": 0})
 	const subscriptionDelay = 350 * time.Millisecond // below Lighter's 200 client messages/minute limit
 	subscribe := func(channel string) error {
 		if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel": channel}); err != nil {
@@ -214,8 +224,7 @@ func (c *Collector) record(message []byte) error {
 					c.Status.NonceGaps++
 					c.Status.mu.Unlock()
 					_ = c.Store.Append("collector_gaps", map[string]any{"at": time.Now().UTC(), "channel": channel, "previous": last, "begin_nonce": begin, "end_nonce": end})
-					delete(c.books, channel)
-					delete(c.lastNonce, channel)
+					c.invalidateBook(channel)
 					return fmt.Errorf("order-book nonce gap on %s: previous=%d begin=%d end=%d", channel, last, begin, end)
 				}
 				if err := c.applyOrderBook(channel, envelope["type"], book, end); err != nil {
@@ -263,30 +272,99 @@ func (c *Collector) applyOrderBook(channel string, eventType any, payload map[st
 	} else if book == nil {
 		return fmt.Errorf("order-book delta before snapshot on %s", channel)
 	}
-	applyLevels(book.Asks, payload["asks"])
-	applyLevels(book.Bids, payload["bids"])
+	if err := applyLevels(book.Asks, payload["asks"]); err != nil {
+		c.Status.mu.Lock()
+		c.Status.InvalidLevels++
+		c.Status.mu.Unlock()
+		c.invalidateBook(channel)
+		return fmt.Errorf("invalid ask level on %s: %w", channel, err)
+	}
+	if err := applyLevels(book.Bids, payload["bids"]); err != nil {
+		c.Status.mu.Lock()
+		c.Status.InvalidLevels++
+		c.Status.mu.Unlock()
+		c.invalidateBook(channel)
+		return fmt.Errorf("invalid bid level on %s: %w", channel, err)
+	}
+	bestBid, bestAsk := bestPrices(book)
+	if bestBid > 0 && bestAsk > 0 && bestBid >= bestAsk {
+		c.Status.mu.Lock()
+		c.Status.CrossedBooks++
+		c.Status.mu.Unlock()
+		c.invalidateBook(channel)
+		return fmt.Errorf("crossed order book on %s: bid=%g ask=%g", channel, bestBid, bestAsk)
+	}
 	book.Nonce = nonce
 	c.Status.mu.Lock()
 	c.Status.BooksReady = len(c.books)
 	c.Status.mu.Unlock()
+	now := time.Now().UTC()
+	if snapshot || now.Sub(c.lastCheckpoint[channel]) >= time.Minute {
+		parts := strings.FieldsFunc(channel, func(r rune) bool { return r == ':' || r == '/' })
+		symbol := ""
+		if len(parts) == 2 {
+			symbol = c.marketIDs[parts[1]]
+		}
+		stream := "reconstructed_book_checkpoints"
+		if symbol != "" {
+			stream = "asset=" + symbol + "/" + stream
+		}
+		if err := c.Store.Append(stream, map[string]any{"schema_version": 1, "recorded_at": now, "channel": channel, "symbol": symbol, "nonce": nonce, "best_bid": bestBid, "best_ask": bestAsk, "bid_levels": len(book.Bids), "ask_levels": len(book.Asks)}); err != nil {
+			return err
+		}
+		c.lastCheckpoint[channel] = now
+	}
 	return nil
 }
 
-func applyLevels(side map[string]string, raw any) {
+func applyLevels(side map[string]string, raw any) error {
 	levels, _ := raw.([]any)
 	for _, item := range levels {
-		level, _ := item.(map[string]any)
+		level, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("malformed level")
+		}
 		price, size := fmt.Sprint(level["price"]), fmt.Sprint(level["size"])
 		if price == "" || price == "<nil>" {
-			continue
+			return fmt.Errorf("missing price")
 		}
-		quantity, err := strconv.ParseFloat(size, 64)
-		if err == nil && quantity == 0 {
+		priceValue, priceErr := strconv.ParseFloat(price, 64)
+		quantity, quantityErr := strconv.ParseFloat(size, 64)
+		if priceErr != nil || priceValue <= 0 || quantityErr != nil || quantity < 0 {
+			return fmt.Errorf("price=%q size=%q", price, size)
+		}
+		if quantity == 0 {
 			delete(side, price)
 			continue
 		}
 		side[price] = size
 	}
+	return nil
+}
+
+func (c *Collector) invalidateBook(channel string) {
+	delete(c.books, channel)
+	delete(c.lastNonce, channel)
+	c.Status.mu.Lock()
+	c.Status.BooksReady = len(c.books)
+	c.Status.mu.Unlock()
+}
+
+func bestPrices(book *orderBook) (float64, float64) {
+	var bestBid, bestAsk float64
+	for raw := range book.Bids {
+		price, _ := strconv.ParseFloat(raw, 64)
+		if price > bestBid {
+			bestBid = price
+		}
+	}
+	for raw := range book.Asks {
+		price, _ := strconv.ParseFloat(raw, 64)
+		if price > 0 && (bestAsk == 0 || price < bestAsk) {
+			bestAsk = price
+		}
+	}
+	return bestBid, bestAsk
 }
 
 func (c *Collector) Handler() http.Handler {

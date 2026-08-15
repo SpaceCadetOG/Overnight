@@ -21,6 +21,7 @@ import (
 	wsruntime "github.com/ogtrading/overnight-strategy/internal/execution/lighter/ws/runtime"
 	"github.com/ogtrading/overnight-strategy/internal/forensics"
 	"github.com/ogtrading/overnight-strategy/internal/journal"
+	"github.com/ogtrading/overnight-strategy/internal/ledger"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
 	"github.com/ogtrading/overnight-strategy/internal/live"
 	lighterdata "github.com/ogtrading/overnight-strategy/internal/marketdata/lighter"
@@ -49,6 +50,7 @@ type liveRuntimeState struct {
 	EntrySubmittedAt time.Time               `json:"entry_submitted_at"`
 	UpdatedAt        time.Time               `json:"updated_at"`
 	LastError        string                  `json:"last_error,omitempty"`
+	InitialRiskUSD   float64                 `json:"initial_risk_usd"`
 }
 
 type app struct {
@@ -70,6 +72,9 @@ type app struct {
 	lastAlertKey    string
 	researchIssues  map[string]string
 	researchAlertAt map[string]time.Time
+	accountIndex    int64
+	seenFillIDs     map[string]bool
+	freshReconciles int
 }
 
 func main() {
@@ -91,7 +96,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment(), researchIssues: map[string]string{}, researchAlertAt: map[string]time.Time{}}
+	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment().WithReceiptStore(events), researchIssues: map[string]string{}, researchAlertAt: map[string]time.Time{}, seenFillIDs: map[string]bool{}}
 	if err := a.connect(ctx); err != nil {
 		fatal(err)
 	}
@@ -173,6 +178,11 @@ func (a *app) connect(ctx context.Context) error {
 		return err
 	}
 	a.account, a.liveExecutor = account, executor
+	a.accountIndex = cfg.AccountIndex
+	oldFills, _ := store.ReadAll[ledger.VenueFill](a.root, "venue_fills")
+	for _, fill := range oldFills {
+		a.seenFillIDs[fill.FillID] = true
+	}
 	return nil
 }
 
@@ -401,6 +411,14 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 	defer cancel()
 	account, err := a.account.ReadSnapshot(request, a.liveMarkets)
 	if err != nil {
+		a.freshReconciles = 0
+		_ = a.events.Append("reconciliation_snapshots", map[string]any{"timestamp": now, "status": "FAILED", "endpoints": account.Endpoints, "error": err.Error(), "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion})
+		return err
+	}
+	a.freshReconciles++
+	allowNewEntries := a.freshReconciles >= 2
+	_ = a.events.Append("reconciliation_snapshots", map[string]any{"timestamp": now, "status": "FRESH", "endpoints": account.Endpoints, "positions": account.Positions, "active_orders": account.Orders, "historical_orders": account.HistoricalOrders, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion})
+	if err := a.persistVenueFills(now, account.Fills); err != nil {
 		return err
 	}
 	liveRiskUSD, basketRiskUSD, err := execution.DefaultRiskLimits().Budget(accountEquity(account), len(universe.Live()))
@@ -412,6 +430,9 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		return err
 	}
 	latest := latestLive(states)
+	if err := a.persistLiveAccounting(now, account, latest); err != nil {
+		return err
+	}
 	for _, asset := range universe.Live() {
 		snapshot, ok := snapshots[asset.Symbol]
 		if !ok || snapshot.Plan == nil || !snapshot.Plan.Valid {
@@ -430,6 +451,9 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		position, averageFill := positionFacts(account, asset.Symbol)
 		mark := liveMark(a.liveMarkets, asset.Symbol)
 		if !exists {
+			if !allowNewEntries {
+				continue
+			}
 			if !cycle1EntryAuthorized(now) {
 				continue
 			}
@@ -462,15 +486,34 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e = managed.SetStrategyOrderID(ids.StrategyOrderID); e != nil {
 				return e
 			}
+			state = liveRuntimeState{SchemaVersion: 1, LifecycleVersion: execution.LifecycleVersion, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now, InitialRiskUSD: liveRiskUSD}
+			intentEvidence := map[string]any{"timestamp": now, "state": "PREPARED", "strategy_order_id": ids.StrategyOrderID, "trade_id": ids.TradeID, "symbol": asset.Symbol, "side": side, "client_order_index": managed.EntryOrderIndex, "price": order.Price, "quantity": order.Quantity, "expires_at": expiry, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion}
+			if e = a.events.Append("order_intents", intentEvidence); e != nil {
+				return e
+			}
+			// Persist the intent before contacting the venue. If submission is
+			// ambiguous, this durable state prevents an automatic duplicate.
+			if e = a.events.Append("live_runtime_states", state); e != nil {
+				return e
+			}
 			response, e := a.liveExecutor.Submit(execution.OrderRequest{Symbol: asset.Symbol, Side: side, Price: order.Price, Size: order.Quantity, ExpiresAt: expiry, OrderType: lightertx.LimitOrder, ClientOrderIndex: managed.EntryOrderIndex, RiskUSD: liveRiskUSD, RiskLimitUSD: liveRiskUSD})
 			if e != nil {
+				state.LastError = e.Error()
+				state.UpdatedAt = time.Now().UTC()
+				_ = a.events.Append("live_runtime_states", state)
+				intentEvidence["timestamp"], intentEvidence["state"], intentEvidence["error"] = state.UpdatedAt, "UNRESOLVED", e.Error()
+				_ = a.events.Append("order_intents", intentEvidence)
 				return e
 			}
 			if e = managed.SetEntryOrderID(response.OrderID); e != nil {
 				return e
 			}
-			state = liveRuntimeState{SchemaVersion: 1, LifecycleVersion: execution.LifecycleVersion, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now}
+			state.UpdatedAt = time.Now().UTC()
 			if e = a.events.Append("live_runtime_states", state); e != nil {
+				return e
+			}
+			intentEvidence["timestamp"], intentEvidence["state"], intentEvidence["venue_order_id"] = state.UpdatedAt, "ACKNOWLEDGED", response.OrderID
+			if e = a.events.Append("order_intents", intentEvidence); e != nil {
 				return e
 			}
 			if e = a.persistLiveJournal(snapshot, asset, state); e != nil {
@@ -501,7 +544,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			err = state.Managed.OnEntryFilled(a.liveExecutor)
 			changed = err == nil
 		} else if containsLifecycleAction(decision.Actions, execution.ActionTakeTP1) {
-			err = state.Managed.OnTP1Filled(a.liveExecutor)
+			err = state.Managed.OnTP1FilledAt(a.liveExecutor, now)
 			changed = err == nil
 		} else if containsLifecycleAction(decision.Actions, execution.ActionReconcileClosed) {
 			err = state.Managed.OnClosed(a.liveExecutor)
@@ -745,6 +788,97 @@ func positionFacts(s lighterexec.Snapshot, symbol string) (float64, float64) {
 		}
 	}
 	return 0, 0
+}
+
+func (a *app) persistVenueFills(now time.Time, rawFills []map[string]any) error {
+	for _, raw := range rawFills {
+		fill, err := ledger.ParseVenueFill(raw, a.accountIndex, now)
+		if err != nil {
+			return fmt.Errorf("normalize venue fill: %w", err)
+		}
+		if a.seenFillIDs[fill.FillID] {
+			continue
+		}
+		if err := a.events.Append("venue_fills", fill); err != nil {
+			return err
+		}
+		a.seenFillIDs[fill.FillID] = true
+	}
+	return nil
+}
+
+func orderIndex(raw map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			parsed, _ := strconv.ParseInt(fmt.Sprint(value), 10, 64)
+			if parsed != 0 {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func venueOrderPurposes(snapshot lighterexec.Snapshot, managed *execution.ManagedTrade) map[string]string {
+	clientPurpose := map[int64]string{managed.EntryOrderIndex: "ENTRY", managed.StopOrderIndex: "EXIT", managed.BreakevenOrderIndex: "EXIT", managed.TP1OrderIndex: "EXIT", managed.TP2OrderIndex: "EXIT"}
+	out := map[string]string{}
+	for _, raw := range append(append([]map[string]any{}, snapshot.Orders...), snapshot.HistoricalOrders...) {
+		client := orderIndex(raw, "client_order_index", "order_index")
+		venue := orderIndex(raw, "order_id", "order_index")
+		if purpose := clientPurpose[client]; purpose != "" && venue != 0 {
+			out[strconv.FormatInt(venue, 10)] = purpose
+		}
+	}
+	return out
+}
+
+func fundingTotal(rows []map[string]any, marketID int64, start time.Time) float64 {
+	total := 0.0
+	for _, row := range rows {
+		if id := orderIndex(row, "market_id"); marketID > 0 && id > 0 && id != marketID {
+			continue
+		}
+		stamp := orderIndex(row, "timestamp")
+		if stamp > 0 {
+			at := time.UnixMilli(stamp)
+			if stamp < 1e12 {
+				at = time.Unix(stamp, 0)
+			}
+			if at.Before(start) {
+				continue
+			}
+		}
+		for _, key := range []string{"amount", "funding", "funding_payment", "value"} {
+			if raw, ok := row[key]; ok {
+				value, _ := strconv.ParseFloat(fmt.Sprint(raw), 64)
+				total += value
+				break
+			}
+		}
+	}
+	return total
+}
+
+func (a *app) persistLiveAccounting(now time.Time, snapshot lighterexec.Snapshot, states map[string]liveRuntimeState) error {
+	fills, err := store.ReadAll[ledger.VenueFill](a.root, "venue_fills")
+	if err != nil {
+		return err
+	}
+	for _, state := range states {
+		if state.Managed == nil || state.InitialRiskUSD <= 0 {
+			continue
+		}
+		purposes := venueOrderPurposes(snapshot, state.Managed)
+		accounting, calcErr := ledger.ComputeAccounting(fills, purposes, state.InitialRiskUSD, fundingTotal(snapshot.FundingPayments, 0, state.EntrySubmittedAt))
+		if calcErr != nil {
+			continue
+		}
+		record := map[string]any{"schema_version": 1, "recorded_at": now, "trade_id": state.TradeID, "strategy_order_id": state.StrategyOrderID, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion, "gross_pnl": accounting.GrossPnL, "fees": accounting.Fees, "funding": accounting.Funding, "net_pnl": accounting.NetPnL, "r_multiple": accounting.RMultiple, "entry_quantity": accounting.EntryQuantity, "exit_quantity": accounting.ExitQuantity, "average_entry": accounting.AverageEntry, "average_exit": accounting.AverageExit, "complete": accounting.Complete, "source": "immutable_venue_fills"}
+		if err := a.events.Append("live_trade_accounting", record); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func liveMark(markets []lighterexec.Market, symbol string) float64 {
 	for _, m := range markets {

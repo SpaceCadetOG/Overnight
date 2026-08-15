@@ -4,6 +4,8 @@ Description=Overnight Strategy - Daily EOD export at 16:05 CT
 [Timer]
 OnCalendar=*-*-* 16:05:00 America/Chicago
 Persistent=true
+RandomizedDelaySec=0
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

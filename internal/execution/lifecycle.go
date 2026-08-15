@@ -27,6 +27,7 @@ type ManagedTrade struct {
 	State                                                                              ProtectionState
 	EntryOrderID, StopOrderID, TP1OrderID, TP2OrderID                                  string
 	EntryOrderIndex, StopOrderIndex, BreakevenOrderIndex, TP1OrderIndex, TP2OrderIndex int64
+	TP1ReconciledAt, BreakevenPromotedAt                                               time.Time
 	mu                                                                                 sync.Mutex
 }
 
@@ -137,6 +138,13 @@ func (t *ManagedTrade) OnEntryFilled(executor Executor) error {
 }
 
 func (t *ManagedTrade) OnTP1Filled(executor Executor) error {
+	return t.OnTP1FilledAt(executor, time.Now().UTC())
+}
+
+// OnTP1FilledAt records durable, exactly-once transition evidence. The
+// timestamp is the reconciliation observation time; the immutable venue fill
+// keeps its separate exchange timestamp in the fill ledger.
+func (t *ManagedTrade) OnTP1FilledAt(executor Executor, at time.Time) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.State == ProtectionRunner || t.State == ProtectionClosed {
@@ -164,6 +172,7 @@ func (t *ManagedTrade) OnTP1Filled(executor Executor) error {
 		return fmt.Errorf("submit TP2: %w", err)
 	}
 	t.StopOrderID, t.TP2OrderID, t.State = be.OrderID, tp2.OrderID, ProtectionRunner
+	t.TP1ReconciledAt, t.BreakevenPromotedAt = at.UTC(), at.UTC()
 	return nil
 }
 

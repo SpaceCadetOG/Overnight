@@ -1,7 +1,9 @@
 package journal
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/ogtrading/overnight-strategy/internal/execution"
@@ -55,6 +57,36 @@ type LiveExecution struct {
 	MAE            float64
 	TP1Hit         bool
 	RuntimeVersion string
+}
+
+// ValidateForResearch prevents operationally incomplete or impossible rows
+// from entering reports, promotion statistics, or ML datasets. The append-only
+// source record remains preserved for forensic diagnosis.
+func (r TradeRecord) ValidateForResearch() error {
+	if r.SchemaVersion != 2 {
+		return fmt.Errorf("unsupported trade journal schema %d", r.SchemaVersion)
+	}
+	if r.ID == "" || r.SessionID == "" || r.OpportunityID == "" || r.StrategyOrderID == "" || r.RunID == "" {
+		return fmt.Errorf("incomplete trade identity")
+	}
+	if r.StrategyVersion == "" || r.RuntimeVersion == "" {
+		return fmt.Errorf("missing strategy/runtime version")
+	}
+	if r.RecordedAt.IsZero() || r.SessionDate.IsZero() {
+		return fmt.Errorf("missing required timestamp")
+	}
+	if r.PlannedEntry <= 0 || r.Order.Stop <= 0 || r.Order.TP1 <= 0 || r.Order.TP2 <= 0 {
+		return fmt.Errorf("invalid planned price geometry")
+	}
+	outcome := strings.ToUpper(strings.TrimSpace(r.Outcome))
+	terminal := outcome != "" && outcome != "OPEN" && outcome != "TP1_OPEN" && outcome != "NO_FILL"
+	if terminal && r.ExitPrice <= 0 {
+		return fmt.Errorf("terminal outcome %s has non-positive exit price", outcome)
+	}
+	if outcome != "NO_FILL" && r.State != execution.Waiting && r.ActualFill <= 0 {
+		return fmt.Errorf("filled lifecycle has non-positive fill price")
+	}
+	return nil
 }
 
 func FromPaper(snapshot live.MarketSnapshot, exchangeSymbol, version string, trade execution.PaperTrade) TradeRecord {

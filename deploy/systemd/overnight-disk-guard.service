@@ -1,0 +1,16 @@
+[Unit]
+Description=Overnight Strategy - trading disk capacity guard
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=traderbot
+Group=traderbot
+EnvironmentFile=-/etc/overnight/runtime.env
+ExecStart=/opt/overnight-strategy/current/scripts/check-trading-disk.sh
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/overnight
+UMask=0077

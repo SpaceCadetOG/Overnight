@@ -122,6 +122,38 @@ func TestFreshSnapshotReplacesPriorConnectionWithoutGap(t *testing.T) {
 	}
 }
 
+func TestCrossedBookIsRejectedAndInvalidated(t *testing.T) {
+	c := New("", "", mustStore(t))
+	err := c.record([]byte(`{"channel":"order_book:1","type":"subscribed/order_book","order_book":{"asks":[{"price":"99","size":"1"}],"bids":[{"price":"100","size":"1"}],"begin_nonce":0,"nonce":10}}`))
+	if err == nil || !strings.Contains(err.Error(), "crossed order book") {
+		t.Fatalf("expected crossed-book rejection, got %v", err)
+	}
+	status := c.Status.Snapshot()
+	if status.CrossedBooks != 1 || status.BooksReady != 0 {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+	if _, exists := c.books["order_book:1"]; exists {
+		t.Fatal("crossed book remained ready")
+	}
+}
+
+func TestNegativeAndMalformedLevelsAreRejected(t *testing.T) {
+	for _, level := range []string{
+		`{"price":"101","size":"-1"}`,
+		`{"price":"bad","size":"1"}`,
+		`{"price":"101","size":"bad"}`,
+	} {
+		c := New("", "", mustStore(t))
+		message := `{"channel":"order_book:1","type":"subscribed/order_book","order_book":{"asks":[` + level + `],"bids":[],"begin_nonce":0,"nonce":10}}`
+		if err := c.record([]byte(message)); err == nil || !strings.Contains(err.Error(), "invalid ask level") {
+			t.Fatalf("level %s: expected rejection, got %v", level, err)
+		}
+		if status := c.Status.Snapshot(); status.InvalidLevels != 1 || status.BooksReady != 0 {
+			t.Fatalf("level %s: unexpected status %+v", level, status)
+		}
+	}
+}
+
 func TestConfirmedLiquidationIsSeparatedAndEnriched(t *testing.T) {
 	s := &memoryStore{}
 	c := New("", "", s)

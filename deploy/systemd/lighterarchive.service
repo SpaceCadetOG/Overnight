@@ -6,8 +6,15 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=traderbot
-WorkingDirectory=/opt/overnight-strategy
+WorkingDirectory=/opt/overnight-strategy/current
 EnvironmentFile=-/etc/overnight-cloud.env
-ExecStart=/opt/overnight-strategy/scripts/archive-and-upload.sh
+EnvironmentFile=-/etc/overnight/runtime.env
+ExecStart=/opt/overnight-strategy/current/scripts/archive-and-upload.sh
 Nice=10
 IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/trading /var/lib/overnight
+UMask=0077
