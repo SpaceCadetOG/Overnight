@@ -8,14 +8,15 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	lightertx "github.com/elliottech/lighter-go/types/txtypes"
+	adapter "github.com/ogtrading/lighter-adapter/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	executionlighter "github.com/ogtrading/overnight-strategy/internal/execution/lighter"
-	wsruntime "github.com/ogtrading/overnight-strategy/internal/execution/lighter/ws/runtime"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
 )
 
@@ -76,14 +77,22 @@ func main() {
 		fatal(fmt.Errorf("BTC must start with no active orders; found %d", len(snapshot.Orders)))
 	}
 
-	executor, err := executionlighter.NewExecutor(cfg.BaseURL, cfg.PrivateKey, cfg.AccountIndex, cfg.APIKeyIndex, cfg.ChainID, wsruntime.NewOrderManager())
+	executor, err := executionlighter.NewExecutor(ctx, executionlighter.Config{
+		BaseURL: cfg.BaseURL, WSURL: cfg.WSURL, PrivateKey: cfg.PrivateKey, AccountIndex: cfg.AccountIndex,
+		APIKeyIndex: cfg.APIKeyIndex, ChainID: cfg.ChainID, StateRoot: filepath.Join(".state", "transaction-test"),
+		Risk: adapter.RiskConfig{
+			AllowedSymbols: []string{"BTC", "ETH"}, MaxOrderNotional: os.Getenv("LIGHTER_MAX_ORDER_NOTIONAL"),
+			MaxPortfolioExposure: os.Getenv("LIGHTER_MAX_PORTFOLIO_EXPOSURE"), MaxSymbolExposure: map[string]string{"BTC": os.Getenv("LIGHTER_BTC_MAX_EXPOSURE"), "ETH": os.Getenv("LIGHTER_ETH_MAX_EXPOSURE")},
+			MinAvailableCollateral: os.Getenv("LIGHTER_MIN_AVAILABLE_COLLATERAL"), MaxDailyLoss: os.Getenv("LIGHTER_MAX_DAILY_LOSS"), MaxRiskFraction: os.Getenv("LIGHTER_MAX_RISK_FRACTION"),
+		},
+	})
 	if err != nil {
 		fatal(err)
 	}
 	limitPrice := math.Floor(mark*.80*10) / 10
 	quantity := math.Ceil((10.25/limitPrice)*1e5) / 1e5
 	index, _ := execution.ClientOrderIndex("controlled-test-limit-" + time.Now().UTC().Format("200601021504"))
-	limit, err := executor.SubmitControlledTest(execution.OrderRequest{Symbol: "BTC", Side: "BUY", Price: limitPrice, Size: quantity, ExpiresAt: time.Now().Add(6 * time.Minute), OrderType: lightertx.LimitOrder, ClientOrderIndex: index, RiskUSD: .01, RiskLimitUSD: .50})
+	limit, err := executor.SubmitControlledTest(execution.OrderRequest{IntentKey: fmt.Sprintf("controlled:%d:limit", index), Symbol: "BTC", Side: "BUY", Price: limitPrice, StopPrice: limitPrice * .99, Size: quantity, ExpiresAt: time.Now().Add(6 * time.Minute), OrderType: lightertx.LimitOrder, ClientOrderIndex: index, RiskUSD: .01, RiskLimitUSD: .50})
 	if err != nil {
 		fatal(fmt.Errorf("limit submit: %w", err))
 	}
@@ -95,7 +104,7 @@ func main() {
 
 	quantity = math.Ceil((10.25/mark)*1e5) / 1e5
 	index, _ = execution.ClientOrderIndex("controlled-test-open-" + time.Now().UTC().Format("200601021504"))
-	opened, err := executor.SubmitControlledTest(execution.OrderRequest{Symbol: "BTC", Side: "BUY", Price: mark * 1.01, Size: quantity, OrderType: lightertx.MarketOrder, ClientOrderIndex: index, RiskUSD: .01, RiskLimitUSD: .50})
+	opened, err := executor.SubmitControlledTest(execution.OrderRequest{IntentKey: fmt.Sprintf("controlled:%d:open", index), Symbol: "BTC", Side: "BUY", Price: mark * 1.01, StopPrice: mark * .99, Size: quantity, OrderType: lightertx.MarketOrder, ClientOrderIndex: index, RiskUSD: .01, RiskLimitUSD: .50})
 	if err != nil {
 		fatal(fmt.Errorf("market open: %w", err))
 	}

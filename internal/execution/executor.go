@@ -3,6 +3,7 @@ package execution
 import "time"
 
 type OrderRequest struct {
+	IntentKey        string
 	Symbol           string
 	Side             string
 	Price            float64
@@ -11,6 +12,7 @@ type OrderRequest struct {
 	ReduceOnly       bool
 	OrderType        uint8
 	TriggerPrice     float64
+	StopPrice        float64
 	ClientOrderIndex int64
 	RiskUSD          float64
 	RiskLimitUSD     float64

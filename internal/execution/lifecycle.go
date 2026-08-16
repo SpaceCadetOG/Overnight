@@ -35,6 +35,10 @@ type indexedCanceler interface {
 	CancelIndexed(symbol string, index int64) error
 }
 
+type indexedCloser interface {
+	CloseIndexed(symbol, side string, size, price float64, index int64, intentKey string) (OrderResponse, error)
+}
+
 func (t *ManagedTrade) SetStrategyOrderID(id string) error {
 	if id == "" {
 		return fmt.Errorf("strategy order ID is required")
@@ -124,11 +128,11 @@ func (t *ManagedTrade) OnEntryFilled(executor Executor) error {
 	if t.Direction == "SHORT" {
 		exitSide = "BUY"
 	}
-	stop, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.Stop, Size: t.Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Stop, ClientOrderIndex: t.StopOrderIndex})
+	stop, err := executor.Submit(OrderRequest{IntentKey: t.StrategyOrderID + ":stop", Symbol: t.Symbol, Side: exitSide, Price: t.Stop, Size: t.Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Stop, ClientOrderIndex: t.StopOrderIndex})
 	if err != nil {
 		return fmt.Errorf("submit initial stop: %w", err)
 	}
-	tp1, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.TP1, Size: t.TP1Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP1, ClientOrderIndex: t.TP1OrderIndex})
+	tp1, err := executor.Submit(OrderRequest{IntentKey: t.StrategyOrderID + ":tp1", Symbol: t.Symbol, Side: exitSide, Price: t.TP1, Size: t.TP1Quantity, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP1, ClientOrderIndex: t.TP1OrderIndex})
 	if err != nil {
 		_ = t.cancel(executor, stop.OrderID, t.StopOrderIndex)
 		return fmt.Errorf("submit TP1: %w", err)
@@ -162,11 +166,11 @@ func (t *ManagedTrade) OnTP1FilledAt(executor Executor, at time.Time) error {
 		exitSide = "BUY"
 	}
 	remaining := t.RunnerQuantity
-	be, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.Fill, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Fill, ClientOrderIndex: t.BreakevenOrderIndex})
+	be, err := executor.Submit(OrderRequest{IntentKey: t.StrategyOrderID + ":breakeven", Symbol: t.Symbol, Side: exitSide, Price: t.Fill, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.StopLossOrder, TriggerPrice: t.Fill, ClientOrderIndex: t.BreakevenOrderIndex})
 	if err != nil {
 		return fmt.Errorf("submit breakeven stop: %w", err)
 	}
-	tp2, err := executor.Submit(OrderRequest{Symbol: t.Symbol, Side: exitSide, Price: t.TP2, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP2, ClientOrderIndex: t.TP2OrderIndex})
+	tp2, err := executor.Submit(OrderRequest{IntentKey: t.StrategyOrderID + ":tp2", Symbol: t.Symbol, Side: exitSide, Price: t.TP2, Size: remaining, ExpiresAt: t.Expiry, ReduceOnly: true, OrderType: lightertx.TakeProfitOrder, TriggerPrice: t.TP2, ClientOrderIndex: t.TP2OrderIndex})
 	if err != nil {
 		_ = t.cancel(executor, be.OrderID, t.BreakevenOrderIndex)
 		return fmt.Errorf("submit TP2: %w", err)
@@ -229,6 +233,14 @@ func (t *ManagedTrade) OnExpiry(executor Executor, remainingSize, referencePrice
 	}
 	if referencePrice <= 0 {
 		return fmt.Errorf("reference price is required to flatten at expiry")
+	}
+	if indexed, ok := executor.(indexedCloser); ok {
+		index, indexErr := ClientOrderIndex(t.StrategyOrderID + ":expiry-close")
+		if indexErr != nil {
+			return indexErr
+		}
+		_, err := indexed.CloseIndexed(t.Symbol, t.Direction, remainingSize, referencePrice, index, t.StrategyOrderID+":expiry-close")
+		return err
 	}
 	_, err := executor.Close(t.Symbol, t.Direction, remainingSize, referencePrice)
 	return err

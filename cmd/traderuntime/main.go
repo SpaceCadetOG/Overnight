@@ -9,16 +9,17 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	lightertx "github.com/elliottech/lighter-go/types/txtypes"
+	adapter "github.com/ogtrading/lighter-adapter/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/buildinfo"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	executionlighter "github.com/ogtrading/overnight-strategy/internal/execution/lighter"
-	wsruntime "github.com/ogtrading/overnight-strategy/internal/execution/lighter/ws/runtime"
 	"github.com/ogtrading/overnight-strategy/internal/forensics"
 	"github.com/ogtrading/overnight-strategy/internal/journal"
 	"github.com/ogtrading/overnight-strategy/internal/ledger"
@@ -173,10 +174,18 @@ func (a *app) connect(ctx context.Context) error {
 	if len(a.liveMarkets) != 2 {
 		return fmt.Errorf("BTC/ETH live market discovery incomplete")
 	}
-	executor, err := executionlighter.NewExecutor(cfg.BaseURL, cfg.PrivateKey, cfg.AccountIndex, cfg.APIKeyIndex, cfg.ChainID, wsruntime.NewOrderManager())
+	riskConfig, err := riskConfigFromEnv()
 	if err != nil {
 		return err
 	}
+	executor, err := executionlighter.NewExecutor(request, executionlighter.Config{
+		BaseURL: cfg.BaseURL, WSURL: cfg.WSURL, PrivateKey: cfg.PrivateKey, AccountIndex: cfg.AccountIndex,
+		APIKeyIndex: cfg.APIKeyIndex, ChainID: cfg.ChainID, StateRoot: filepath.Join(a.root, "runtime"), Risk: riskConfig,
+	})
+	if err != nil {
+		return err
+	}
+	executor.StartPrivateStream(ctx)
 	a.account, a.liveExecutor = account, executor
 	a.accountIndex = cfg.AccountIndex
 	oldFills, _ := store.ReadAll[ledger.VenueFill](a.root, "venue_fills")
@@ -486,6 +495,9 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e = managed.SetStrategyOrderID(ids.StrategyOrderID); e != nil {
 				return e
 			}
+			if e = a.liveExecutor.ValidateProtection(ctx, asset.Symbol, managed.Quantity, managed.Stop, managed.TP1Quantity, managed.TP1, managed.RunnerQuantity, managed.TP2); e != nil {
+				return fmt.Errorf("%s protection preflight: %w", asset.Symbol, e)
+			}
 			state = liveRuntimeState{SchemaVersion: 1, LifecycleVersion: execution.LifecycleVersion, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now, InitialRiskUSD: liveRiskUSD}
 			intentEvidence := map[string]any{"timestamp": now, "state": "PREPARED", "strategy_order_id": ids.StrategyOrderID, "trade_id": ids.TradeID, "symbol": asset.Symbol, "side": side, "client_order_index": managed.EntryOrderIndex, "price": order.Price, "quantity": order.Quantity, "expires_at": expiry, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion}
 			if e = a.events.Append("order_intents", intentEvidence); e != nil {
@@ -496,7 +508,7 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			if e = a.events.Append("live_runtime_states", state); e != nil {
 				return e
 			}
-			response, e := a.liveExecutor.Submit(execution.OrderRequest{Symbol: asset.Symbol, Side: side, Price: order.Price, Size: order.Quantity, ExpiresAt: expiry, OrderType: lightertx.LimitOrder, ClientOrderIndex: managed.EntryOrderIndex, RiskUSD: liveRiskUSD, RiskLimitUSD: liveRiskUSD})
+			response, e := a.liveExecutor.Submit(execution.OrderRequest{IntentKey: ids.StrategyOrderID + ":entry", Symbol: asset.Symbol, Side: side, Price: order.Price, Size: order.Quantity, StopPrice: order.Stop, ExpiresAt: expiry, OrderType: lightertx.LimitOrder, ClientOrderIndex: managed.EntryOrderIndex, RiskUSD: liveRiskUSD, RiskLimitUSD: liveRiskUSD})
 			if e != nil {
 				state.LastError = e.Error()
 				state.UpdatedAt = time.Now().UTC()
@@ -911,6 +923,50 @@ func configFromEnv() (lighterexec.Config, error) {
 	}
 	return lighterexec.Config{BaseURL: os.Getenv("LIGHTER_BASE_URL"), WSURL: os.Getenv("LIGHTER_WS_URL"), AccountIndex: account, APIKeyIndex: uint8(key), PrivateKey: os.Getenv("LIGHTER_API_PRIVATE_KEY"), ChainID: uint32(chain)}, nil
 }
+
+func riskConfigFromEnv() (adapter.RiskConfig, error) {
+	required := func(name string) (string, error) {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			return "", fmt.Errorf("%s is required for funded execution", name)
+		}
+		return value, nil
+	}
+	maxOrder, err := required("LIGHTER_MAX_ORDER_NOTIONAL")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	maxPortfolio, err := required("LIGHTER_MAX_PORTFOLIO_EXPOSURE")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	btcExposure, err := required("LIGHTER_BTC_MAX_EXPOSURE")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	ethExposure, err := required("LIGHTER_ETH_MAX_EXPOSURE")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	minCollateral, err := required("LIGHTER_MIN_AVAILABLE_COLLATERAL")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	maxDailyLoss, err := required("LIGHTER_MAX_DAILY_LOSS")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	maxRiskFraction, err := required("LIGHTER_MAX_RISK_FRACTION")
+	if err != nil {
+		return adapter.RiskConfig{}, err
+	}
+	return adapter.RiskConfig{
+		AllowedSymbols: []string{"BTC", "ETH"}, MaxOrderNotional: maxOrder,
+		MaxPortfolioExposure: maxPortfolio, MaxSymbolExposure: map[string]string{"BTC": btcExposure, "ETH": ethExposure},
+		MinAvailableCollateral: minCollateral, MaxDailyLoss: maxDailyLoss, MaxRiskFraction: maxRiskFraction,
+	}, nil
+}
+
 func loadEnv(path string) error {
 	f, e := os.Open(path)
 	if e != nil {

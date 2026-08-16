@@ -1,64 +1,133 @@
 package lighter
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"net/url"
-	"sync"
-	"sync/atomic"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
-	lighterclient "github.com/elliottech/lighter-go/client"
-	lighterhttp "github.com/elliottech/lighter-go/client/http"
-	lightertypes "github.com/elliottech/lighter-go/types"
 	lightertx "github.com/elliottech/lighter-go/types/txtypes"
-
-	adapter "github.com/ogtrading/overnight-strategy/internal/adapters/lighter"
+	adapter "github.com/ogtrading/lighter-adapter/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
-	"github.com/ogtrading/overnight-strategy/internal/execution/lighter/ws"
-	"github.com/ogtrading/overnight-strategy/internal/execution/lighter/ws/runtime"
 )
 
-type submittedOrder struct {
-	Symbol string
-	Index  int64
+type Config struct {
+	BaseURL      string
+	WSURL        string
+	PrivateKey   string
+	AccountIndex int64
+	APIKeyIndex  uint8
+	ChainID      uint32
+	StateRoot    string
+	Risk         adapter.RiskConfig
 }
 
 type Executor struct {
-	txClient     *lighterclient.TxClient
-	adapter      *adapter.Client
-	accountIndex int64
-	apiKeyIndex  uint8
-	orderManager *runtime.OrderManager
-	nextIndex    atomic.Int64
-	mu           sync.RWMutex
-	submitted    map[string]submittedOrder
+	manager   *adapter.Manager
+	execution *adapter.RiskManagedExecution
+	store     *adapter.RecoveryStore
+	stream    *adapter.PrivateStream
 }
 
-func NewExecutor(baseURL, privateKey string, accountIndex int64, apiKeyIndex uint8, chainID uint32, orderManager *runtime.OrderManager) (*Executor, error) {
-	txClient, err := lighterclient.CreateClient(lighterhttp.NewClient(baseURL), privateKey, chainID, apiKeyIndex, accountIndex)
+func NewExecutor(ctx context.Context, cfg Config) (*Executor, error) {
+	manager, err := adapter.NewManager(adapter.Config{BaseURL: cfg.BaseURL, ChainID: cfg.ChainID, AccountIndex: cfg.AccountIndex, APIKeyIndex: cfg.APIKeyIndex, PrivateKey: cfg.PrivateKey})
 	if err != nil {
 		return nil, err
 	}
-	executor := &Executor{txClient: txClient, adapter: adapter.NewClient(baseURL), accountIndex: accountIndex, apiKeyIndex: apiKeyIndex, orderManager: orderManager, submitted: map[string]submittedOrder{}}
-	executor.nextIndex.Store(time.Now().UnixMilli())
-	return executor, nil
+	stateRoot := strings.TrimSpace(cfg.StateRoot)
+	if stateRoot == "" {
+		return nil, errors.New("Lighter execution state root is required")
+	}
+	store, err := adapter.OpenRecoveryStore(filepath.Join(stateRoot, "lighter-recovery.json"), cfg.AccountIndex, cfg.APIKeyIndex)
+	if err != nil {
+		return nil, err
+	}
+	engine, _, err := adapter.RecoverExecutionEngine(ctx, manager, store)
+	if err != nil {
+		return nil, err
+	}
+	portfolio, err := adapter.NewPortfolioManager(engine)
+	if err != nil {
+		return nil, err
+	}
+	risk, err := adapter.NewRiskManager(cfg.Risk, filepath.Join(stateRoot, "lighter-risk.json"))
+	if err != nil {
+		return nil, err
+	}
+	riskExecution, err := adapter.NewRiskManagedExecution(engine, portfolio, risk)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := adapter.NewPrivateStream(manager, riskExecution, adapter.PrivateStreamConfig{URL: cfg.WSURL})
+	if err != nil {
+		return nil, err
+	}
+	return &Executor{manager: manager, execution: riskExecution, store: store, stream: stream}, nil
+}
+
+func (e *Executor) StartPrivateStream(ctx context.Context) {
+	go func() {
+		_ = e.stream.Run(ctx)
+	}()
+}
+
+func (e *Executor) ValidateProtection(ctx context.Context, symbol string, quantity, stop, tp1Quantity, tp1, runnerQuantity, tp2 float64) error {
+	market, err := e.manager.MarketBySymbol(ctx, symbol)
+	if err != nil {
+		return err
+	}
+	for _, order := range []struct {
+		name     string
+		quantity float64
+		price    float64
+	}{{"stop", quantity, stop}, {"TP1", tp1Quantity, tp1}, {"TP2", runnerQuantity, tp2}} {
+		if _, err := market.EncodeOrder(order.quantity, order.price); err != nil {
+			minimum, minErr := market.MinimumQuantityAtPrices(order.price)
+			if minErr != nil {
+				return fmt.Errorf("%s protection invalid: %w", order.name, err)
+			}
+			return fmt.Errorf("%s protection quantity %.8f is not executable (minimum %.8f): %w", order.name, order.quantity, minimum, err)
+		}
+	}
+	return nil
+}
+
+func translateRequest(req execution.OrderRequest) (adapter.PlaceOrderRequest, error) {
+	if strings.TrimSpace(req.IntentKey) == "" {
+		return adapter.PlaceOrderRequest{}, errors.New("deterministic intent key is required")
+	}
+	side := adapter.Side(strings.ToUpper(req.Side))
+	if side != adapter.SideBuy && side != adapter.SideSell {
+		return adapter.PlaceOrderRequest{}, fmt.Errorf("invalid side %q", req.Side)
+	}
+	result := adapter.PlaceOrderRequest{
+		IntentKey: req.IntentKey, ClientOrderIndex: req.ClientOrderIndex, Symbol: req.Symbol, Side: side,
+		Quantity: req.Size, Price: req.Price, ReduceOnly: req.ReduceOnly, ExpiresAt: req.ExpiresAt,
+		TimeInForce: adapter.TimeInForceGoodTill, StopPrice: req.StopPrice,
+	}
+	switch req.OrderType {
+	case lightertx.LimitOrder:
+		result.Type = adapter.ExecutionOrderLimit
+	case lightertx.MarketOrder:
+		result.Type, result.TimeInForce = adapter.ExecutionOrderMarket, adapter.TimeInForceIOC
+	case lightertx.StopLossOrder:
+		result.Type, result.TimeInForce, result.TriggerPrice = adapter.ExecutionOrderStopLoss, adapter.TimeInForceIOC, req.TriggerPrice
+	case lightertx.TakeProfitOrder:
+		result.Type, result.TimeInForce, result.TriggerPrice = adapter.ExecutionOrderTakeProfit, adapter.TimeInForceIOC, req.TriggerPrice
+	case lightertx.StopLossLimitOrder:
+		result.Type, result.TriggerPrice = adapter.ExecutionOrderStopLossLimit, req.TriggerPrice
+	case lightertx.TakeProfitLimitOrder:
+		result.Type, result.TriggerPrice = adapter.ExecutionOrderTakeProfitLimit, req.TriggerPrice
+	default:
+		return adapter.PlaceOrderRequest{}, fmt.Errorf("unsupported Lighter order type %d", req.OrderType)
+	}
+	return result, nil
 }
 
 func (e *Executor) Submit(req execution.OrderRequest) (execution.OrderResponse, error) {
-	return e.submit(req, true)
-}
-
-// SubmitControlledTest is isolated from strategy automation and may bypass only
-// the daily entry window. Symbol, kill-switch, risk, idempotency, precision and
-// account reconciliation gates remain enforced.
-func (e *Executor) SubmitControlledTest(req execution.OrderRequest) (execution.OrderResponse, error) {
-	return e.submit(req, false)
-}
-
-func (e *Executor) submit(req execution.OrderRequest, enforceWindow bool) (execution.OrderResponse, error) {
-	if _, err := MarketFor(req.Symbol); err != nil {
-		return execution.OrderResponse{}, err
-	}
 	if !req.ReduceOnly {
 		if err := execution.GateFromEnvironment(execution.Live).Authorize(req.Symbol, time.Now()); err != nil {
 			return execution.OrderResponse{}, err
@@ -68,149 +137,96 @@ func (e *Executor) submit(req execution.OrderRequest, enforceWindow bool) (execu
 			return execution.OrderResponse{}, err
 		}
 		now := time.Now()
-		if enforceWindow && !execution.WithinOrderWindow(now, now.In(location), location) {
+		if !execution.WithinOrderWindow(now, now.In(location), location) {
 			return execution.OrderResponse{}, fmt.Errorf("new %s entry outside 05:00-05:05 CT order window", req.Symbol)
-		}
-		if req.ClientOrderIndex <= 0 {
-			return execution.OrderResponse{}, fmt.Errorf("deterministic client order index is required for restart-safe entry submission")
 		}
 		if req.RiskUSD <= 0 || req.RiskLimitUSD <= 0 || req.RiskUSD > req.RiskLimitUSD+1e-9 {
 			return execution.OrderResponse{}, fmt.Errorf("entry risk %.2f exceeds or omits limit %.2f", req.RiskUSD, req.RiskLimitUSD)
 		}
-		if err := e.preflightAccount(req.Symbol); err != nil {
-			return execution.OrderResponse{}, err
-		}
 	}
-	index := req.ClientOrderIndex
-	if index <= 0 {
-		index = e.nextIndex.Add(1)
-	}
-	expiry := req.ExpiresAt
-	if expiry.IsZero() && req.OrderType != lightertx.MarketOrder {
-		expiry = time.Now().Add(6 * time.Minute)
-	}
-	txReq, err := BuildCreateOrder(OrderRequest{Symbol: req.Symbol, Side: Side(req.Side), Price: req.Price, Quantity: req.Size, ClientOrderIndex: index, Expiry: expiry, Type: req.OrderType, ReduceOnly: req.ReduceOnly, TriggerPrice: req.TriggerPrice})
+	request, err := translateRequest(req)
 	if err != nil {
 		return execution.OrderResponse{}, err
 	}
-	tx, err := e.txClient.GetCreateOrderTransaction(txReq, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	submission, err := e.execution.PlaceOrder(ctx, request)
 	if err != nil {
 		return execution.OrderResponse{}, err
 	}
-	orderID, err := e.send(tx)
-	if err != nil {
-		return execution.OrderResponse{}, err
-	}
-	e.mu.Lock()
-	e.submitted[orderID] = submittedOrder{Symbol: req.Symbol, Index: index}
-	e.mu.Unlock()
-	if e.orderManager != nil {
-		e.orderManager.Update(ws.OrderSnapshot{OrderID: orderID, ClientOrderID: fmt.Sprint(index), Symbol: req.Symbol, Status: ws.OrderSubmitted, Side: req.Side, Price: req.Price, Size: req.Size, Timestamp: time.Now().UTC()})
-	}
-	return execution.OrderResponse{OrderID: orderID, Status: "SUBMITTED", Mode: execution.Live}, nil
+	return execution.OrderResponse{OrderID: submission.TxHash, Status: "SUBMITTED", Mode: execution.Live}, nil
 }
 
-func (e *Executor) preflightAccount(symbol string) error {
-	auth, err := e.txClient.GetAuthToken(time.Now().Add(7 * time.Hour))
+func (e *Executor) SubmitControlledTest(req execution.OrderRequest) (execution.OrderResponse, error) {
+	// Controlled tests retain every production gate except the entry-time window.
+	if !req.ReduceOnly {
+		if err := execution.GateFromEnvironment(execution.Live).Authorize(req.Symbol, time.Now()); err != nil {
+			return execution.OrderResponse{}, err
+		}
+		if req.RiskUSD <= 0 || req.RiskLimitUSD <= 0 || req.RiskUSD > req.RiskLimitUSD+1e-9 {
+			return execution.OrderResponse{}, fmt.Errorf("entry risk %.2f exceeds or omits limit %.2f", req.RiskUSD, req.RiskLimitUSD)
+		}
+	}
+	request, err := translateRequest(req)
 	if err != nil {
-		return fmt.Errorf("preflight auth: %w", err)
+		return execution.OrderResponse{}, err
 	}
-	e.adapter.SetAuth(auth)
-	account, err := e.adapter.GetAccount(e.accountIndex)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	submission, err := e.execution.PlaceOrder(ctx, request)
 	if err != nil {
-		return fmt.Errorf("preflight account reconciliation: %w", err)
+		return execution.OrderResponse{}, err
 	}
-	open := 0
-	for _, position := range account.Positions {
-		if position.Size == 0 {
-			continue
-		}
-		if position.Symbol == symbol {
-			return fmt.Errorf("%s already has an open position", symbol)
-		}
-		if position.Symbol == "BTC" || position.Symbol == "ETH" {
-			open++
-		}
-	}
-	if open >= execution.DefaultRiskLimits().MaxOpenPositions {
-		return fmt.Errorf("maximum live positions already open")
-	}
-	return nil
+	return execution.OrderResponse{OrderID: submission.TxHash, Status: "SUBMITTED", Mode: execution.Live}, nil
 }
 
 func (e *Executor) Cancel(orderID string) error {
-	e.mu.RLock()
-	submitted, ok := e.submitted[orderID]
-	e.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("unknown locally submitted order %s", orderID)
+	for _, mapping := range e.store.Snapshot().Orders {
+		if mapping.TxHash == orderID {
+			return e.CancelIndexed(mapping.Symbol, mapping.ClientOrderIndex)
+		}
 	}
-	req, err := BuildCancelOrder(submitted.Symbol, submitted.Index)
-	if err != nil {
-		return err
-	}
-	tx, err := e.txClient.GetCancelOrderTransaction(req, nil)
-	if err != nil {
-		return err
-	}
-	if _, err := e.send(tx); err != nil {
-		return err
-	}
-	if e.orderManager != nil {
-		e.orderManager.Update(ws.OrderSnapshot{OrderID: orderID, ClientOrderID: fmt.Sprint(submitted.Index), Symbol: submitted.Symbol, Status: ws.OrderCanceled, Timestamp: time.Now().UTC()})
-	}
-	return nil
+	return fmt.Errorf("unknown persisted order %s", orderID)
 }
 
-func (e *Executor) GetPosition(symbol string) float64 { return 0 }
+func (e *Executor) CancelIndexed(_ string, index int64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return e.execution.CancelOrder(ctx, index)
+}
+
+func (e *Executor) GetPosition(symbol string) float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	snapshot, err := e.execution.GetPositions(ctx)
+	if err != nil {
+		return 0
+	}
+	position, ok := snapshot.Position(symbol)
+	if !ok {
+		return 0
+	}
+	size, _ := strconv.ParseFloat(position.Size, 64)
+	if position.Side == adapter.PositionSideShort {
+		return -size
+	}
+	return size
+}
 
 func (e *Executor) Close(symbol, side string, size, price float64) (execution.OrderResponse, error) {
-	closeSide := Buy
+	index, err := execution.ClientOrderIndex(fmt.Sprintf("manual:%s:%s:%d", symbol, side, time.Now().UnixNano()))
+	if err != nil {
+		return execution.OrderResponse{}, err
+	}
+	return e.CloseIndexed(symbol, side, size, price, index, fmt.Sprintf("manual:%d", index))
+}
+
+func (e *Executor) CloseIndexed(symbol, side string, size, price float64, index int64, intentKey string) (execution.OrderResponse, error) {
+	closeSide := "BUY"
 	if side == "LONG" {
-		closeSide = Sell
+		closeSide = "SELL"
 	}
-	return e.Submit(execution.OrderRequest{Symbol: symbol, Side: string(closeSide), Size: size, Price: price, ReduceOnly: true, OrderType: lightertx.MarketOrder})
+	return e.Submit(execution.OrderRequest{IntentKey: intentKey, Symbol: symbol, Side: closeSide, Size: size, Price: price, ReduceOnly: true, OrderType: lightertx.MarketOrder, ClientOrderIndex: index})
 }
 
-func (e *Executor) CancelIndexed(symbol string, index int64) error {
-	req, err := BuildCancelOrder(symbol, index)
-	if err != nil {
-		return err
-	}
-	tx, err := e.txClient.GetCancelOrderTransaction(req, nil)
-	if err != nil {
-		return err
-	}
-	_, err = e.send(tx)
-	return err
-}
-
-func (e *Executor) send(tx lightertx.TxInfo) (string, error) {
-	auth, err := e.txClient.GetAuthToken(time.Now().Add(7 * time.Hour))
-	if err != nil {
-		return "", err
-	}
-	e.adapter.SetAuth(auth)
-	txInfo, err := tx.GetTxInfo()
-	if err != nil {
-		return "", err
-	}
-	values := url.Values{}
-	values.Set("tx_type", fmt.Sprintf("%d", tx.GetTxType()))
-	values.Set("tx_info", txInfo)
-	values.Set("price_protection", "false")
-	responseHash, err := e.adapter.SendTx(values)
-	if err != nil {
-		return "", err
-	}
-	if responseHash != "" {
-		return responseHash, nil
-	}
-	if signedHash := tx.GetTxHash(); signedHash != "" {
-		return signedHash, nil
-	}
-	return "", fmt.Errorf("Lighter accepted transaction but no transaction hash was available")
-}
-
-// Compile-time guards for the SDK request types used by this executor.
-var _ = lightertypes.CancelOrderTxReq{}
+var _ execution.Executor = (*Executor)(nil)
