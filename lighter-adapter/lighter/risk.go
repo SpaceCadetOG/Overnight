@@ -23,6 +23,7 @@ type RiskConfig struct {
 	MinAvailableCollateral string            `json:"min_available_collateral"`
 	MaxDailyLoss           string            `json:"max_daily_loss"`
 	MaxRiskFraction        string            `json:"max_risk_fraction"`
+	MaxOpenPositions       int               `json:"max_open_positions"`
 }
 
 type RiskState struct {
@@ -57,6 +58,9 @@ func NewRiskManager(config RiskConfig, statePath string) (*RiskManager, error) {
 	}
 	if len(config.AllowedSymbols) == 0 {
 		return nil, errors.New("at least one allowed symbol is required")
+	}
+	if config.MaxOpenPositions <= 0 {
+		return nil, errors.New("maximum open positions must be positive")
 	}
 	for _, field := range []struct{ name, value string }{
 		{"max order notional", config.MaxOrderNotional},
@@ -305,6 +309,18 @@ func (r *RiskManager) ValidateOrder(ctx context.Context, manager *Manager, portf
 	}
 	if request.StopPrice <= 0 {
 		return riskRejection("entry stop price is required")
+	}
+	openPositions := 0
+	for _, position := range portfolio.Positions {
+		size, ok := decimal(position.Size)
+		if ok && size.Sign() > 0 {
+			openPositions++
+		}
+	}
+	position, exists := portfolio.Position(symbol)
+	alreadyOpen := exists && !PositionIsFlat(position)
+	if !alreadyOpen && openPositions >= r.config.MaxOpenPositions {
+		return riskRejection("maximum funded positions already open")
 	}
 	if (request.Side == SideBuy && request.StopPrice >= request.Price) || (request.Side == SideSell && request.StopPrice <= request.Price) {
 		return riskRejection("entry stop price is on the wrong side")

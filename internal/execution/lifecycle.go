@@ -15,6 +15,7 @@ const (
 	ProtectionWaiting ProtectionState = "WAITING_ENTRY_FILL"
 	ProtectionInitial ProtectionState = "INITIAL_PROTECTION_ACTIVE"
 	ProtectionRunner  ProtectionState = "RUNNER_PROTECTION_ACTIVE"
+	ProtectionClosing ProtectionState = "CLOSE_PENDING"
 	ProtectionClosed  ProtectionState = "CLOSED"
 )
 
@@ -186,6 +187,10 @@ func (t *ManagedTrade) OnClosed(executor Executor) error {
 	if t.State == ProtectionClosed {
 		return nil
 	}
+	if t.State == ProtectionClosing {
+		t.State = ProtectionClosed
+		return nil
+	}
 	var first error
 	for i, id := range []string{t.StopOrderID, t.TP1OrderID, t.TP2OrderID} {
 		if id == "" {
@@ -200,8 +205,11 @@ func (t *ManagedTrade) OnClosed(executor Executor) error {
 			first = err
 		}
 	}
+	if first != nil {
+		return first
+	}
 	t.State = ProtectionClosed
-	return first
+	return nil
 }
 
 // OnExpiry enforces the 16:00 CT terminal condition. Waiting entries are
@@ -225,14 +233,33 @@ func (t *ManagedTrade) OnExpiry(executor Executor, remainingSize, referencePrice
 		t.mu.Unlock()
 		return nil
 	}
-	if err := t.OnClosed(executor); err != nil {
-		return err
-	}
 	if remainingSize <= 0 {
-		return nil
+		return t.OnClosed(executor)
 	}
 	if referencePrice <= 0 {
 		return fmt.Errorf("reference price is required to flatten at expiry")
+	}
+	// Cancel protection first, but do not claim CLOSED while the venue still
+	// reports exposure. The next authoritative flat reconciliation completes
+	// the terminal transition.
+	if state != ProtectionClosing {
+		t.mu.Lock()
+		for i, id := range []string{t.StopOrderID, t.TP1OrderID, t.TP2OrderID} {
+			if id == "" {
+				continue
+			}
+			stopIndex := t.StopOrderIndex
+			if t.State == ProtectionRunner {
+				stopIndex = t.BreakevenOrderIndex
+			}
+			indices := []int64{stopIndex, t.TP1OrderIndex, t.TP2OrderIndex}
+			if err := t.cancel(executor, id, indices[i]); err != nil {
+				t.mu.Unlock()
+				return err
+			}
+		}
+		t.State = ProtectionClosing
+		t.mu.Unlock()
 	}
 	if indexed, ok := executor.(indexedCloser); ok {
 		index, indexErr := ClientOrderIndex(t.StrategyOrderID + ":expiry-close")

@@ -13,7 +13,7 @@ func testRiskConfig() RiskConfig {
 	return RiskConfig{
 		AllowedSymbols: []string{"BTC", "ETH"}, MaxOrderNotional: "1000",
 		MaxPortfolioExposure: "2000", MaxSymbolExposure: map[string]string{"BTC": "1500", "ETH": "1000"},
-		MinAvailableCollateral: "100", MaxDailyLoss: "100", MaxRiskFraction: "0.01",
+		MinAvailableCollateral: "100", MaxDailyLoss: "100", MaxRiskFraction: "0.01", MaxOpenPositions: 2,
 	}
 }
 

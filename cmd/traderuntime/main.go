@@ -39,19 +39,44 @@ var (
 )
 
 type liveRuntimeState struct {
-	SchemaVersion    int                     `json:"schema_version"`
-	LifecycleVersion string                  `json:"lifecycle_version"`
-	SessionID        string                  `json:"session_id"`
-	OpportunityID    string                  `json:"opportunity_id"`
-	StrategyOrderID  string                  `json:"strategy_order_id"`
-	TradeID          string                  `json:"trade_id"`
-	Symbol           string                  `json:"symbol"`
-	Order            execution.Order         `json:"order"`
-	Managed          *execution.ManagedTrade `json:"managed_trade"`
-	EntrySubmittedAt time.Time               `json:"entry_submitted_at"`
-	UpdatedAt        time.Time               `json:"updated_at"`
-	LastError        string                  `json:"last_error,omitempty"`
-	InitialRiskUSD   float64                 `json:"initial_risk_usd"`
+	SchemaVersion      int                     `json:"schema_version"`
+	LifecycleVersion   string                  `json:"lifecycle_version"`
+	SessionID          string                  `json:"session_id"`
+	OpportunityID      string                  `json:"opportunity_id"`
+	StrategyOrderID    string                  `json:"strategy_order_id"`
+	TradeID            string                  `json:"trade_id"`
+	Symbol             string                  `json:"symbol"`
+	Order              execution.Order         `json:"order"`
+	Managed            *execution.ManagedTrade `json:"managed_trade"`
+	EntrySubmittedAt   time.Time               `json:"entry_submitted_at"`
+	UpdatedAt          time.Time               `json:"updated_at"`
+	LastError          string                  `json:"last_error,omitempty"`
+	InitialRiskUSD     float64                 `json:"initial_risk_usd"`
+	ClientOrderIndex   int64                   `json:"client_order_index,omitempty"`
+	ExchangeOrderIndex int64                   `json:"exchange_order_index,omitempty"`
+	MarketID           int16                   `json:"market_id,omitempty"`
+	Nonce              int64                   `json:"nonce,omitempty"`
+	EncodedBaseAmount  int64                   `json:"encoded_base_amount,omitempty"`
+	EncodedPrice       uint32                  `json:"encoded_price,omitempty"`
+	RequestedQuantity  float64                 `json:"requested_quantity,omitempty"`
+	RequestedPrice     float64                 `json:"requested_price,omitempty"`
+	ExecutionStatus    string                  `json:"execution_status,omitempty"`
+}
+
+type liveAssetOutcome struct {
+	Timestamp         time.Time `json:"timestamp"`
+	SessionID         string    `json:"session_id"`
+	OpportunityID     string    `json:"opportunity_id"`
+	StrategyOrderID   string    `json:"strategy_order_id"`
+	TradeID           string    `json:"trade_id"`
+	Symbol            string    `json:"symbol"`
+	Status            string    `json:"status"`
+	Reason            string    `json:"reason,omitempty"`
+	RiskUSD           float64   `json:"risk_usd,omitempty"`
+	RequestedNotional float64   `json:"requested_notional,omitempty"`
+	MinimumNotional   float64   `json:"minimum_notional,omitempty"`
+	StrategyVersion   string    `json:"strategy_version"`
+	RuntimeVersion    string    `json:"runtime_version"`
 }
 
 type app struct {
@@ -186,6 +211,7 @@ func (a *app) connect(ctx context.Context) error {
 		return err
 	}
 	executor.StartPrivateStream(ctx)
+	go a.capturePrivateExecutionEvents(ctx, executor)
 	a.account, a.liveExecutor = account, executor
 	a.accountIndex = cfg.AccountIndex
 	oldFills, _ := store.ReadAll[ledger.VenueFill](a.root, "venue_fills")
@@ -193,6 +219,24 @@ func (a *app) connect(ctx context.Context) error {
 		a.seenFillIDs[fill.FillID] = true
 	}
 	return nil
+}
+
+func (a *app) capturePrivateExecutionEvents(ctx context.Context, executor *executionlighter.Executor) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-executor.Events():
+			if event.Order != nil {
+				if err := executor.ObserveOrder(event.Order); err != nil && !strings.Contains(err.Error(), "is not tracked") {
+					fmt.Fprintf(os.Stderr, "private order reconciliation failed: %v\n", err)
+				}
+			}
+			if err := a.events.Append("private_execution_events", event); err != nil {
+				fmt.Fprintf(os.Stderr, "private execution event persistence failed: %v\n", err)
+			}
+		}
+	}
 }
 
 func (a *app) reconcile(ctx context.Context, now time.Time) (bool, error) {
@@ -457,6 +501,23 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 		if exists && state.LifecycleVersion == "" {
 			state.LifecycleVersion = execution.LifecycleVersion
 		}
+		if exists && strings.HasPrefix(state.ExecutionStatus, "SKIPPED_") {
+			continue
+		}
+		if exists {
+			if evidence, ok := a.liveExecutor.OrderEvidence(ids.StrategyOrderID + ":entry"); ok {
+				evidenceChanged := state.ExchangeOrderIndex != evidence.ExchangeOrderIndex || state.Nonce != evidence.Nonce
+				state.ClientOrderIndex, state.ExchangeOrderIndex, state.MarketID = evidence.ClientOrderIndex, evidence.ExchangeOrderIndex, evidence.MarketIndex
+				state.Nonce, state.EncodedBaseAmount, state.EncodedPrice = evidence.Nonce, evidence.EncodedBaseAmount, evidence.EncodedPrice
+				state.RequestedQuantity, state.RequestedPrice = evidence.RequestedQuantity, evidence.RequestedPrice
+				if evidenceChanged {
+					state.UpdatedAt = now
+					if e := a.events.Append("live_runtime_states", state); e != nil {
+						return e
+					}
+				}
+			}
+		}
 		position, averageFill := positionFacts(account, asset.Symbol)
 		mark := liveMark(a.liveMarkets, asset.Symbol)
 		if !exists {
@@ -472,7 +533,12 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			market := a.markets[asset.MarketSymbol()]
 			spec, e := execution.SpecFromMarket(market)
 			if e != nil {
-				return e
+				return fmt.Errorf("%s market metadata: %w", asset.Symbol, e)
+			}
+			if !strings.EqualFold(spec.Status, "active") {
+				a.persistLiveSkip(now, ids, asset.Symbol, execution.Order{}, liveRiskUSD, "SKIPPED_MARKET_INACTIVE", "market is not active")
+				a.recordLiveAssetOutcome(now, ids, asset.Symbol, "SKIPPED_MARKET_INACTIVE", "market is not active", liveRiskUSD, 0, spec.MinimumNotional)
+				continue
 			}
 			side := "BUY"
 			if snapshot.Plan.Direction == "SHORT" {
@@ -481,12 +547,20 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 			expiry := time.Date(snapshot.SessionDate.Year(), snapshot.SessionDate.Month(), snapshot.SessionDate.Day(), 16, 0, 0, 0, a.location)
 			riskDistance := math.Abs(snapshot.Plan.Entry - snapshot.Plan.Stop)
 			if riskDistance <= 0 {
-				return fmt.Errorf("%s has invalid live risk distance", asset.Symbol)
+				a.persistLiveSkip(now, ids, asset.Symbol, execution.Order{}, liveRiskUSD, "SKIPPED_RISK_LIMIT", "invalid live risk distance")
+				a.recordLiveAssetOutcome(now, ids, asset.Symbol, "SKIPPED_RISK_LIMIT", "invalid live risk distance", liveRiskUSD, 0, spec.MinimumNotional)
+				continue
 			}
 			liveQuantity := liveRiskUSD / riskDistance
 			order := spec.Normalize(execution.Order{Symbol: asset.Symbol, Side: side, Price: snapshot.Plan.Entry, Quantity: liveQuantity, Stop: snapshot.Plan.Stop, TP1: snapshot.Plan.TP1, TP2: snapshot.Plan.TP2, ExpiresAt: expiry.Unix()})
 			if e = spec.Validate(order); e != nil {
-				return e
+				status, skippable := classifyLiveAssetError(e)
+				if !skippable {
+					return fmt.Errorf("%s order validation: %w", asset.Symbol, e)
+				}
+				a.persistLiveSkip(now, ids, asset.Symbol, order, liveRiskUSD, status, e.Error())
+				a.recordLiveAssetOutcome(now, ids, asset.Symbol, status, e.Error(), liveRiskUSD, order.Price*order.Quantity, spec.MinimumNotional)
+				continue
 			}
 			managed, e := execution.NewManagedTrade(asset.Symbol, string(snapshot.Plan.Direction), order.Quantity, order.Price, order.Stop, order.TP1, order.TP2, expiry)
 			if e != nil {
@@ -496,9 +570,15 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 				return e
 			}
 			if e = a.liveExecutor.ValidateProtection(ctx, asset.Symbol, managed.Quantity, managed.Stop, managed.TP1Quantity, managed.TP1, managed.RunnerQuantity, managed.TP2); e != nil {
-				return fmt.Errorf("%s protection preflight: %w", asset.Symbol, e)
+				status, skippable := classifyLiveAssetError(e)
+				if !skippable {
+					return fmt.Errorf("%s protection preflight: %w", asset.Symbol, e)
+				}
+				a.persistLiveSkip(now, ids, asset.Symbol, order, liveRiskUSD, status, e.Error())
+				a.recordLiveAssetOutcome(now, ids, asset.Symbol, status, e.Error(), liveRiskUSD, order.Price*order.Quantity, spec.MinimumNotional)
+				continue
 			}
-			state = liveRuntimeState{SchemaVersion: 1, LifecycleVersion: execution.LifecycleVersion, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now, InitialRiskUSD: liveRiskUSD}
+			state = liveRuntimeState{SchemaVersion: 2, LifecycleVersion: execution.LifecycleVersion, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: asset.Symbol, Order: order, Managed: managed, EntrySubmittedAt: now, UpdatedAt: now, InitialRiskUSD: liveRiskUSD}
 			intentEvidence := map[string]any{"timestamp": now, "state": "PREPARED", "strategy_order_id": ids.StrategyOrderID, "trade_id": ids.TradeID, "symbol": asset.Symbol, "side": side, "client_order_index": managed.EntryOrderIndex, "price": order.Price, "quantity": order.Quantity, "expires_at": expiry, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion}
 			if e = a.events.Append("order_intents", intentEvidence); e != nil {
 				return e
@@ -515,22 +595,37 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 				_ = a.events.Append("live_runtime_states", state)
 				intentEvidence["timestamp"], intentEvidence["state"], intentEvidence["error"] = state.UpdatedAt, "UNRESOLVED", e.Error()
 				_ = a.events.Append("order_intents", intentEvidence)
+				status, skippable := classifyLiveAssetError(e)
+				state.ExecutionStatus = status
+				_ = a.events.Append("live_runtime_states", state)
+				a.recordLiveAssetOutcome(now, ids, asset.Symbol, status, e.Error(), liveRiskUSD, order.Price*order.Quantity, spec.MinimumNotional)
+				if skippable {
+					continue
+				}
 				return e
 			}
 			if e = managed.SetEntryOrderID(response.OrderID); e != nil {
 				return e
 			}
+			state.ClientOrderIndex, state.ExchangeOrderIndex, state.MarketID = response.ClientOrderIndex, response.ExchangeOrderIndex, response.MarketID
+			state.Nonce, state.EncodedBaseAmount, state.EncodedPrice = response.Nonce, response.EncodedBaseAmount, response.EncodedPrice
+			state.RequestedQuantity, state.RequestedPrice = response.RequestedQuantity, response.RequestedPrice
+			state.ExecutionStatus = "LIVE_SUBMITTED"
 			state.UpdatedAt = time.Now().UTC()
 			if e = a.events.Append("live_runtime_states", state); e != nil {
 				return e
 			}
 			intentEvidence["timestamp"], intentEvidence["state"], intentEvidence["venue_order_id"] = state.UpdatedAt, "ACKNOWLEDGED", response.OrderID
+			intentEvidence["market_id"], intentEvidence["nonce"] = response.MarketID, response.Nonce
+			intentEvidence["exchange_order_index"] = response.ExchangeOrderIndex
+			intentEvidence["encoded_base_amount"], intentEvidence["encoded_price"] = response.EncodedBaseAmount, response.EncodedPrice
 			if e = a.events.Append("order_intents", intentEvidence); e != nil {
 				return e
 			}
 			if e = a.persistLiveJournal(snapshot, asset, state); e != nil {
 				return e
 			}
+			a.recordLiveAssetOutcome(now, ids, asset.Symbol, "LIVE_SUBMITTED", "", liveRiskUSD, order.Price*order.Quantity, spec.MinimumNotional)
 			fmt.Printf("%-5s LIVE ENTRY SUBMITTED qty=%.8f tx=%s\n", asset.Symbol, order.Quantity, response.OrderID)
 			a.notifier.BestEffort("LIVE Order Submitted", fmt.Sprintf("%s %s\nEntry: %.8f\nQuantity: %.8f\nRisk: $%.4f\nBasket limit: $%.4f", asset.Symbol, side, order.Price, order.Quantity, liveRiskUSD, basketRiskUSD), "high", "rotating_light")
 			continue
@@ -584,6 +679,67 @@ func (a *app) reconcileLive(ctx context.Context, now time.Time, snapshots map[st
 	return nil
 }
 
+func classifyLiveAssetError(err error) (string, bool) {
+	if err == nil {
+		return "LIVE_SUBMITTED", false
+	}
+	var executionErr *adapter.ExecutionError
+	if errors.As(err, &executionErr) {
+		if strings.Contains(strings.ToLower(executionErr.Operation), "reconcil") {
+			return "FAILED_RECONCILIATION", false
+		}
+		if executionErr.Kind == adapter.ErrorAuth {
+			return "FAILED_SIGNING", false
+		}
+		if executionErr.Kind != adapter.ErrorValidation {
+			return "FAILED_SUBMISSION", false
+		}
+	}
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "not active"):
+		return "SKIPPED_MARKET_INACTIVE", true
+	case strings.Contains(text, "notional") && strings.Contains(text, "minimum"),
+		strings.Contains(text, "below minimum quote"):
+		return "SKIPPED_MIN_NOTIONAL", true
+	case strings.Contains(text, "below minimum"), strings.Contains(text, "not executable"):
+		return "SKIPPED_EXCHANGE_MINIMUM", true
+	case strings.Contains(text, "risk"), strings.Contains(text, "exposure"), strings.Contains(text, "collateral"):
+		return "SKIPPED_RISK_LIMIT", true
+	}
+	if executionErr != nil && executionErr.Kind == adapter.ErrorValidation {
+		return "SKIPPED_EXCHANGE_MINIMUM", true
+	}
+	return "FAILED_SUBMISSION", false
+}
+
+func (a *app) recordLiveAssetOutcome(now time.Time, ids forensics.Identity, symbol, status, reason string, riskUSD, requestedNotional, minimumNotional float64) {
+	outcome := liveAssetOutcome{
+		Timestamp: now, SessionID: ids.SessionID, OpportunityID: ids.OpportunityID,
+		StrategyOrderID: ids.StrategyOrderID, TradeID: ids.TradeID, Symbol: symbol,
+		Status: status, Reason: reason, RiskUSD: riskUSD, RequestedNotional: requestedNotional,
+		MinimumNotional: minimumNotional, StrategyVersion: strategyVersion, RuntimeVersion: execution.LifecycleVersion,
+	}
+	if err := a.events.Append("live_execution_outcomes", outcome); err != nil {
+		fmt.Fprintf(os.Stderr, "%s outcome persistence failed: %v\n", symbol, err)
+	}
+	if strings.HasPrefix(status, "SKIPPED_") {
+		fmt.Printf("%-5s %s risk=$%.4f notional=$%.4f minimum=$%.4f reason=%s\n", symbol, status, riskUSD, requestedNotional, minimumNotional, reason)
+	}
+}
+
+func (a *app) persistLiveSkip(now time.Time, ids forensics.Identity, symbol string, order execution.Order, riskUSD float64, status, reason string) {
+	state := liveRuntimeState{
+		SchemaVersion: 2, LifecycleVersion: execution.LifecycleVersion,
+		SessionID: ids.SessionID, OpportunityID: ids.OpportunityID, StrategyOrderID: ids.StrategyOrderID,
+		TradeID: ids.TradeID, Symbol: symbol, Order: order, EntrySubmittedAt: now, UpdatedAt: now,
+		LastError: reason, InitialRiskUSD: riskUSD, ExecutionStatus: status,
+	}
+	if err := a.events.Append("live_runtime_states", state); err != nil {
+		fmt.Fprintf(os.Stderr, "%s skip persistence failed: %v\n", symbol, err)
+	}
+}
+
 func managedLifecycleState(trade *execution.ManagedTrade) execution.LifecycleState {
 	state := execution.LifecycleState{FillPrice: trade.Fill, ActiveStop: trade.Stop}
 	switch trade.State {
@@ -591,6 +747,8 @@ func managedLifecycleState(trade *execution.ManagedTrade) execution.LifecycleSta
 		state.Phase = execution.LifecycleInitial
 	case execution.ProtectionRunner:
 		state.Phase, state.TP1Hit, state.ActiveStop = execution.LifecycleRunner, true, trade.Fill
+	case execution.ProtectionClosing:
+		state.Phase = execution.LifecycleInitial
 	case execution.ProtectionClosed:
 		state.Phase = execution.LifecycleClosed
 	default:
@@ -746,6 +904,8 @@ func (a *app) persistLiveJournal(snapshot live.MarketSnapshot, asset universe.As
 		paperState, outcome = execution.PaperFilled, "OPEN"
 	case execution.ProtectionRunner:
 		paperState, outcome = execution.PaperTP1, "TP1_OPEN"
+	case execution.ProtectionClosing:
+		paperState, outcome = execution.PaperFilled, "CLOSE_PENDING"
 	case execution.ProtectionClosed:
 		paperState, outcome = execution.PaperClosed, "CLOSED"
 	}
@@ -960,10 +1120,22 @@ func riskConfigFromEnv() (adapter.RiskConfig, error) {
 	if err != nil {
 		return adapter.RiskConfig{}, err
 	}
+	strategyFraction := execution.DefaultRiskLimits().PerTradePercent / 100
+	configuredFraction, err := strconv.ParseFloat(maxRiskFraction, 64)
+	if err != nil || configuredFraction <= 0 {
+		return adapter.RiskConfig{}, fmt.Errorf("LIGHTER_MAX_RISK_FRACTION must be a positive decimal")
+	}
+	if configuredFraction+1e-12 < strategyFraction {
+		return adapter.RiskConfig{}, fmt.Errorf(
+			"LIGHTER_MAX_RISK_FRACTION %.6f conflicts with frozen strategy risk %.6f; configure it as an equal-or-higher global circuit breaker",
+			configuredFraction, strategyFraction,
+		)
+	}
 	return adapter.RiskConfig{
 		AllowedSymbols: []string{"BTC", "ETH"}, MaxOrderNotional: maxOrder,
 		MaxPortfolioExposure: maxPortfolio, MaxSymbolExposure: map[string]string{"BTC": btcExposure, "ETH": ethExposure},
 		MinAvailableCollateral: minCollateral, MaxDailyLoss: maxDailyLoss, MaxRiskFraction: maxRiskFraction,
+		MaxOpenPositions: execution.DefaultRiskLimits().MaxOpenPositions,
 	}, nil
 }
 

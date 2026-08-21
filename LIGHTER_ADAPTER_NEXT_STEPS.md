@@ -39,6 +39,24 @@ ID from the current time during normal strategy execution.
 8. On restart, recover adapter state before generating or submitting new work.
 9. At the terminal state, verify the position is flat and no related orders remain.
 
+## Risk hierarchy
+
+The frozen strategy computes the per-trade dollar-risk budget first (Cycle 1:
+0.5% of authenticated equity). Portfolio limits may further restrict or reject
+that plan. The adapter validates dynamic market metadata, precision, minimums,
+maximum notional, collateral, and exposure. It never raises quantity to satisfy
+an exchange minimum.
+
+`LIGHTER_MAX_RISK_FRACTION` is a global circuit breaker and must be at least
+`0.005` while the frozen strategy remains at 0.5%. A lower value is a startup
+configuration conflict, not a silent strategy override. A risk-sized order
+below Lighter's minimum is recorded as `SKIPPED_MIN_NOTIONAL`, and evaluation
+continues independently for the other live asset.
+
+Grouped OTO/OCO/OTOCO transport remains preview-only until a separately
+authorized funded lifecycle validation succeeds. Preview builds, signs,
+validates, and exposes transaction evidence but cannot submit it.
+
 ## Do not implement locally
 
 Do not add another Lighter signer, nonce counter, market-ID table, decimal table,

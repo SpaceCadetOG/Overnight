@@ -2,12 +2,64 @@ package main
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	adapter "github.com/ogtrading/lighter-adapter/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
 )
+
+func TestLiveAssetMinimumIsSkippableAndDoesNotBecomeSubmissionFailure(t *testing.T) {
+	status, skippable := classifyLiveAssetError(errors.New("notional 7.03 below minimum 10.00"))
+	if status != "SKIPPED_MIN_NOTIONAL" || !skippable {
+		t.Fatalf("status=%s skippable=%v", status, skippable)
+	}
+	status, skippable = classifyLiveAssetError(errors.New("HTTP 503"))
+	if status != "FAILED_SUBMISSION" || skippable {
+		t.Fatalf("infrastructure status=%s skippable=%v", status, skippable)
+	}
+	status, skippable = classifyLiveAssetError(&adapter.ExecutionError{Kind: adapter.ErrorTimeout, Operation: "risk portfolio", Retryable: true, Err: errors.New("timeout")})
+	if status != "FAILED_SUBMISSION" || skippable {
+		t.Fatalf("portfolio infrastructure failure status=%s skippable=%v", status, skippable)
+	}
+}
+
+func TestRiskHierarchyRejectsAdapterCapBelowFrozenStrategy(t *testing.T) {
+	setRiskEnvironment(t, "0.001")
+	if _, err := riskConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "conflicts with frozen strategy risk") {
+		t.Fatalf("expected explicit hierarchy conflict, got %v", err)
+	}
+	setRiskEnvironment(t, "0.005")
+	if _, err := riskConfigFromEnv(); err != nil {
+		t.Fatalf("matching circuit breaker rejected: %v", err)
+	}
+}
+
+func setRiskEnvironment(t *testing.T, fraction string) {
+	t.Helper()
+	values := map[string]string{
+		"LIGHTER_MAX_ORDER_NOTIONAL": "11", "LIGHTER_MAX_PORTFOLIO_EXPOSURE": "20",
+		"LIGHTER_BTC_MAX_EXPOSURE": "12", "LIGHTER_ETH_MAX_EXPOSURE": "12",
+		"LIGHTER_MIN_AVAILABLE_COLLATERAL": "10", "LIGHTER_MAX_DAILY_LOSS": "1",
+		"LIGHTER_MAX_RISK_FRACTION": fraction,
+	}
+	for key, value := range values {
+		old, present := os.LookupEnv(key)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, old)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+}
 
 func TestRuntimeErrorSummaryHidesHTTPBody(t *testing.T) {
 	key, message := runtimeErrorSummary(errors.New("BTC paper: Lighter /api/v1/candles returned HTTP 503: <html><body>Service Temporarily Unavailable</body></html>"))

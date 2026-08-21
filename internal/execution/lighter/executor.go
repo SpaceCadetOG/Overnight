@@ -74,6 +74,22 @@ func (e *Executor) StartPrivateStream(ctx context.Context) {
 	}()
 }
 
+func (e *Executor) Events() <-chan adapter.StreamEvent { return e.stream.Events() }
+
+func (e *Executor) PrivateSnapshot() adapter.PrivateStreamSnapshot { return e.stream.Snapshot() }
+
+func (e *Executor) ObserveOrder(order *adapter.ReconciledOrder) error {
+	return e.store.MarkReconciledByClientOrderIndex(order)
+}
+
+func (e *Executor) OrderEvidence(intentKey string) (adapter.OrderMapping, bool) {
+	mapping, ok := e.store.Snapshot().Orders[intentKey]
+	if !ok || mapping == nil {
+		return adapter.OrderMapping{}, false
+	}
+	return *mapping, true
+}
+
 func (e *Executor) ValidateProtection(ctx context.Context, symbol string, quantity, stop, tp1Quantity, tp1, runnerQuantity, tp2 float64) error {
 	market, err := e.manager.MarketBySymbol(ctx, symbol)
 	if err != nil {
@@ -154,7 +170,7 @@ func (e *Executor) Submit(req execution.OrderRequest) (execution.OrderResponse, 
 	if err != nil {
 		return execution.OrderResponse{}, err
 	}
-	return execution.OrderResponse{OrderID: submission.TxHash, Status: "SUBMITTED", Mode: execution.Live}, nil
+	return orderResponse(submission), nil
 }
 
 func (e *Executor) SubmitControlledTest(req execution.OrderRequest) (execution.OrderResponse, error) {
@@ -177,7 +193,17 @@ func (e *Executor) SubmitControlledTest(req execution.OrderRequest) (execution.O
 	if err != nil {
 		return execution.OrderResponse{}, err
 	}
-	return execution.OrderResponse{OrderID: submission.TxHash, Status: "SUBMITTED", Mode: execution.Live}, nil
+	return orderResponse(submission), nil
+}
+
+func orderResponse(submission *adapter.OrderSubmission) execution.OrderResponse {
+	return execution.OrderResponse{
+		OrderID: submission.TxHash, Status: "SUBMITTED", Mode: execution.Live,
+		ClientOrderIndex: submission.ClientOrderIndex, ExchangeOrderIndex: submission.ExchangeOrderIndex,
+		MarketID: submission.MarketIndex, Nonce: submission.Nonce,
+		EncodedBaseAmount: submission.EncodedBaseAmount, EncodedPrice: submission.EncodedPrice,
+		RequestedQuantity: submission.RequestedQuantity, RequestedPrice: submission.RequestedPrice,
+	}
 }
 
 func (e *Executor) Cancel(orderID string) error {

@@ -19,9 +19,17 @@ type OrderRequest struct {
 }
 
 type OrderResponse struct {
-	OrderID string
-	Status  string
-	Mode    Mode
+	OrderID            string
+	Status             string
+	Mode               Mode
+	ClientOrderIndex   int64
+	ExchangeOrderIndex int64
+	MarketID           int16
+	Nonce              int64
+	EncodedBaseAmount  int64
+	EncodedPrice       uint32
+	RequestedQuantity  float64
+	RequestedPrice     float64
 }
 
 type Executor interface {

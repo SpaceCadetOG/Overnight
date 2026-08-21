@@ -24,6 +24,9 @@ func TestRecoveryStorePersistsIdempotencyMapping(t *testing.T) {
 	if mapping.Symbol != "BTC" || mapping.SubmissionState != SubmissionReserved {
 		t.Fatalf("mapping=%+v", mapping)
 	}
+	if err := store.MarkPrepared(mapping.IntentKey, 77, 20, 600000, 0.00020, 60000.0); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.MarkSubmitted(mapping.IntentKey, "0xabc"); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +36,9 @@ func TestRecoveryStorePersistsIdempotencyMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := reopened.Snapshot().Orders[mapping.IntentKey]
-	if saved.ClientOrderIndex != 1234 || saved.TxHash != "0xabc" || saved.SubmissionState != SubmissionSubmitted {
+	if saved.ClientOrderIndex != 1234 || saved.TxHash != "0xabc" || saved.SubmissionState != SubmissionSubmitted ||
+		saved.Nonce != 77 || saved.EncodedBaseAmount != 20 || saved.EncodedPrice != 600000 ||
+		saved.RequestedQuantity != 0.00020 || saved.RequestedPrice != 60000.0 {
 		t.Fatalf("saved=%+v", saved)
 	}
 	info, err := os.Stat(path)
@@ -60,6 +65,24 @@ func TestRecoveryStoreRejectsDuplicateIntent(t *testing.T) {
 	}
 	if second.ClientOrderIndex != first.ClientOrderIndex {
 		t.Fatalf("duplicate changed client ID: first=%d second=%d", first.ClientOrderIndex, second.ClientOrderIndex)
+	}
+}
+
+func TestRecoveryStorePersistsExchangeOrderIndexFromStream(t *testing.T) {
+	store, err := OpenRecoveryStore(filepath.Join(t.TempDir(), "state.json"), 724535, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveOrder("btc-entry", 100, "BTC", 1); err != nil {
+		t.Fatal(err)
+	}
+	order := &ReconciledOrder{ClientOrderIndex: 100, ExchangeOrderIndex: 9001, MarketIndex: 1, State: OrderStateOpen}
+	if err := store.MarkReconciledByClientOrderIndex(order); err != nil {
+		t.Fatal(err)
+	}
+	saved := store.Snapshot().Orders["btc-entry"]
+	if saved.ExchangeOrderIndex != 9001 || saved.LastOrder == nil || saved.LastOrder.State != OrderStateOpen {
+		t.Fatalf("saved=%+v", saved)
 	}
 }
 

@@ -66,10 +66,16 @@ type PlaceOrderRequest struct {
 }
 
 type OrderSubmission struct {
-	IntentKey        string `json:"intent_key"`
-	ClientOrderIndex int64  `json:"client_order_index"`
-	MarketIndex      int16  `json:"market_index"`
-	TxHash           string `json:"tx_hash"`
+	IntentKey          string  `json:"intent_key"`
+	ClientOrderIndex   int64   `json:"client_order_index"`
+	MarketIndex        int16   `json:"market_index"`
+	TxHash             string  `json:"tx_hash"`
+	ExchangeOrderIndex int64   `json:"exchange_order_index,omitempty"`
+	Nonce              int64   `json:"nonce"`
+	EncodedBaseAmount  int64   `json:"encoded_base_amount"`
+	EncodedPrice       uint32  `json:"encoded_price"`
+	RequestedQuantity  float64 `json:"requested_quantity"`
+	RequestedPrice     float64 `json:"requested_price"`
 }
 
 type ErrorKind string
@@ -268,7 +274,7 @@ func (e *ExecutionEngine) PlaceOrder(ctx context.Context, request PlaceOrderRequ
 	mapping, err := e.store.ReserveOrder(request.IntentKey, clientOrderIndex, market.Symbol, market.MarketID)
 	if err != nil {
 		if errors.Is(err, ErrDuplicateOrderIntent) && mapping != nil && mapping.SubmissionState == SubmissionSubmitted {
-			return &OrderSubmission{IntentKey: mapping.IntentKey, ClientOrderIndex: mapping.ClientOrderIndex, MarketIndex: mapping.MarketIndex, TxHash: mapping.TxHash}, nil
+			return submissionFromMapping(mapping), nil
 		}
 		if errors.Is(err, ErrDuplicateOrderIntent) && mapping != nil && mapping.SubmissionState == SubmissionFailed {
 			mapping, err = e.store.ReopenFailedIntent(request.IntentKey)
@@ -285,7 +291,7 @@ func (e *ExecutionEngine) PlaceOrder(ctx context.Context, request PlaceOrderRequ
 				if persistErr := e.store.MarkReconciledSubmitted(request.IntentKey, reconciled); persistErr != nil {
 					return nil, classifyExecutionError("resolve ambiguous order", persistErr)
 				}
-				return &OrderSubmission{IntentKey: mapping.IntentKey, ClientOrderIndex: mapping.ClientOrderIndex, MarketIndex: mapping.MarketIndex, TxHash: mapping.TxHash}, nil
+				return submissionFromMapping(e.store.Snapshot().Orders[request.IntentKey]), nil
 			}
 			return nil, classifyExecutionError("resolve ambiguous order", fmt.Errorf("%w: client_order_index=%d remains exchange-unknown", ErrDuplicateOrderIntent, mapping.ClientOrderIndex))
 		}
@@ -303,6 +309,10 @@ func (e *ExecutionEngine) PlaceOrder(ctx context.Context, request PlaceOrderRequ
 		return nil, classifyExecutionError("place order", errors.New("transaction client is not configured"))
 	}
 	nonce := e.takeNonce()
+	if err := e.store.MarkPrepared(request.IntentKey, nonce, encoded.BaseAmount, encoded.Price, request.Quantity, request.Price); err != nil {
+		_ = e.store.MarkSubmissionFailed(request.IntentKey)
+		return nil, classifyExecutionError("place order", fmt.Errorf("persist encoded request: %w", err))
+	}
 	isAsk := uint8(0)
 	if request.Side == SideSell {
 		isAsk = 1
@@ -341,8 +351,23 @@ func (e *ExecutionEngine) PlaceOrder(ctx context.Context, request PlaceOrderRequ
 	}
 	return &OrderSubmission{
 		IntentKey: request.IntentKey, ClientOrderIndex: clientOrderIndex,
-		MarketIndex: encoded.MarketIndex, TxHash: response.TxHash,
+		MarketIndex: encoded.MarketIndex, TxHash: response.TxHash, Nonce: nonce,
+		EncodedBaseAmount: encoded.BaseAmount, EncodedPrice: encoded.Price,
+		RequestedQuantity: request.Quantity, RequestedPrice: request.Price,
 	}, nil
+}
+
+func submissionFromMapping(mapping *OrderMapping) *OrderSubmission {
+	if mapping == nil {
+		return nil
+	}
+	return &OrderSubmission{
+		IntentKey: mapping.IntentKey, ClientOrderIndex: mapping.ClientOrderIndex,
+		MarketIndex: mapping.MarketIndex, TxHash: mapping.TxHash,
+		ExchangeOrderIndex: mapping.ExchangeOrderIndex, Nonce: mapping.Nonce,
+		EncodedBaseAmount: mapping.EncodedBaseAmount, EncodedPrice: mapping.EncodedPrice,
+		RequestedQuantity: mapping.RequestedQuantity, RequestedPrice: mapping.RequestedPrice,
+	}
 }
 
 func (e *ExecutionEngine) CancelOrder(ctx context.Context, clientOrderIndex int64) error {

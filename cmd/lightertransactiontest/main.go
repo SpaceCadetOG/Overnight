@@ -84,6 +84,7 @@ func main() {
 			AllowedSymbols: []string{"BTC", "ETH"}, MaxOrderNotional: os.Getenv("LIGHTER_MAX_ORDER_NOTIONAL"),
 			MaxPortfolioExposure: os.Getenv("LIGHTER_MAX_PORTFOLIO_EXPOSURE"), MaxSymbolExposure: map[string]string{"BTC": os.Getenv("LIGHTER_BTC_MAX_EXPOSURE"), "ETH": os.Getenv("LIGHTER_ETH_MAX_EXPOSURE")},
 			MinAvailableCollateral: os.Getenv("LIGHTER_MIN_AVAILABLE_COLLATERAL"), MaxDailyLoss: os.Getenv("LIGHTER_MAX_DAILY_LOSS"), MaxRiskFraction: os.Getenv("LIGHTER_MAX_RISK_FRACTION"),
+			MaxOpenPositions: execution.DefaultRiskLimits().MaxOpenPositions,
 		},
 	})
 	if err != nil {

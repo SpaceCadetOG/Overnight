@@ -34,9 +34,27 @@ type OrderMapping struct {
 	MarketIndex        int16            `json:"market_index"`
 	SubmissionState    SubmissionState  `json:"submission_state"`
 	TxHash             string           `json:"tx_hash,omitempty"`
+	Nonce              int64            `json:"nonce,omitempty"`
+	EncodedBaseAmount  int64            `json:"encoded_base_amount,omitempty"`
+	EncodedPrice       uint32           `json:"encoded_price,omitempty"`
+	RequestedQuantity  float64          `json:"requested_quantity,omitempty"`
+	RequestedPrice     float64          `json:"requested_price,omitempty"`
 	LastOrder          *ReconciledOrder `json:"last_order,omitempty"`
 	CreatedAt          int64            `json:"created_at"`
 	UpdatedAt          int64            `json:"updated_at"`
+}
+
+// MarkPrepared persists the exact human request and signed integer encoding
+// before the transaction is built or sent. This is execution evidence, not a
+// source for reconstructing strategy geometry.
+func (s *RecoveryStore) MarkPrepared(intentKey string, nonce, encodedBaseAmount int64, encodedPrice uint32, requestedQuantity, requestedPrice float64) error {
+	return s.updateMapping(intentKey, func(mapping *OrderMapping) {
+		mapping.Nonce = nonce
+		mapping.EncodedBaseAmount = encodedBaseAmount
+		mapping.EncodedPrice = encodedPrice
+		mapping.RequestedQuantity = requestedQuantity
+		mapping.RequestedPrice = requestedPrice
+	})
 }
 
 type RecoveryState struct {
@@ -237,6 +255,26 @@ func (s *RecoveryStore) MarkReconciledSubmitted(intentKey string, order *Reconci
 		copy := *order
 		mapping.LastOrder = &copy
 	})
+}
+
+func (s *RecoveryStore) MarkReconciledByClientOrderIndex(order *ReconciledOrder) error {
+	if order == nil || order.ClientOrderIndex <= 0 || order.State == OrderStateUnknown {
+		return errors.New("known reconciled order with client index is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, mapping := range s.state.Orders {
+		if mapping.ClientOrderIndex != order.ClientOrderIndex {
+			continue
+		}
+		mapping.SubmissionState = SubmissionSubmitted
+		mapping.ExchangeOrderIndex = order.ExchangeOrderIndex
+		copy := *order
+		mapping.LastOrder = &copy
+		mapping.UpdatedAt = time.Now().UnixMilli()
+		return s.persistLocked()
+	}
+	return fmt.Errorf("client_order_index=%d is not tracked", order.ClientOrderIndex)
 }
 
 func (s *RecoveryStore) updateMapping(intentKey string, update func(*OrderMapping)) error {

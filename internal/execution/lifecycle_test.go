@@ -99,8 +99,14 @@ func TestExpiryCancelsWaitingEntryOrFlattensPosition(t *testing.T) {
 	if err := open.OnExpiry(exec, 2, 99); err != nil {
 		t.Fatal(err)
 	}
-	if exec.closes != 1 || open.State != ProtectionClosed {
-		t.Fatalf("open position not flattened: %+v", open)
+	if exec.closes != 1 || open.State != ProtectionClosing {
+		t.Fatalf("open position did not remain pending venue confirmation: %+v", open)
+	}
+	if err := open.OnClosed(exec); err != nil {
+		t.Fatal(err)
+	}
+	if open.State != ProtectionClosed {
+		t.Fatalf("venue-flat reconciliation did not close trade: %+v", open)
 	}
 }
 
