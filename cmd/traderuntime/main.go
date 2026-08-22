@@ -80,27 +80,28 @@ type liveAssetOutcome struct {
 }
 
 type app struct {
-	root            string
-	location        *time.Location
-	events          *store.JSONL
-	data            *lighterdata.Client
-	markets         map[string]lighterdata.Market
-	poll            time.Duration
-	liveRequested   bool
-	liveExecutor    *executionlighter.Executor
-	account         *lighterexec.Client
-	liveMarkets     []lighterexec.Market
-	lastPaperAt     time.Time
-	lastHourlyAt    time.Time
-	notifier        *notify.Client
-	degraded        bool
-	lastAlertAt     time.Time
-	lastAlertKey    string
-	researchIssues  map[string]string
-	researchAlertAt map[string]time.Time
-	accountIndex    int64
-	seenFillIDs     map[string]bool
-	freshReconciles int
+	root             string
+	location         *time.Location
+	events           *store.JSONL
+	data             *lighterdata.Client
+	markets          map[string]lighterdata.Market
+	poll             time.Duration
+	liveRequested    bool
+	liveExecutor     *executionlighter.Executor
+	account          *lighterexec.Client
+	liveMarkets      []lighterexec.Market
+	lastPaperAt      time.Time
+	lastHourlyAt     time.Time
+	notifier         *notify.Client
+	degraded         bool
+	lastAlertAt      time.Time
+	lastAlertKey     string
+	healthySince     time.Time
+	researchIssues   map[string]string
+	researchIncident bool
+	accountIndex     int64
+	seenFillIDs      map[string]bool
+	freshReconciles  int
 }
 
 func main() {
@@ -122,7 +123,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment().WithReceiptStore(events), researchIssues: map[string]string{}, researchAlertAt: map[string]time.Time{}, seenFillIDs: map[string]bool{}}
+	a := &app{root: *root, location: location, events: events, data: lighterdata.New(os.Getenv("LIGHTER_BASE_URL"), nil), poll: *poll, liveRequested: *liveRequested, notifier: notify.FromEnvironment().WithReceiptStore(events), researchIssues: map[string]string{}, seenFillIDs: map[string]bool{}}
 	if err := a.connect(ctx); err != nil {
 		fatal(err)
 	}
@@ -140,7 +141,7 @@ func main() {
 		} else {
 			_ = events.Append("runtime_health", map[string]any{"timestamp": now, "status": "PASS", "paper_assets": len(universe.All()), "funded_enabled": a.liveExecutor != nil})
 			if checked {
-				a.notifyRecovered()
+				a.notifyRecovered(now)
 			}
 		}
 		a.halfHourlyNotice(time.Now().UTC())
@@ -288,15 +289,14 @@ func (a *app) reconcile(ctx context.Context, now time.Time) (bool, error) {
 
 func (a *app) recordResearchIssue(now time.Time, symbol string, err error) {
 	key, message := runtimeErrorSummary(err)
-	previous := a.researchIssues[symbol]
 	a.researchIssues[symbol] = key
-	if previous == key && now.Sub(a.researchAlertAt[symbol]) < 15*time.Minute {
-		return
-	}
-	a.researchAlertAt[symbol] = now
 	_ = a.events.Append("runtime_research_health", map[string]any{"timestamp": now, "symbol": symbol, "status": "DEGRADED", "error_key": key, "error": message, "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion})
 	fmt.Fprintf(os.Stderr, "%s research runtime: %s\n", symbol, message)
-	a.notifier.BestEffort("Research Market Degraded", fmt.Sprintf("%s paper runtime: %s\nBTC/ETH live reconciliation continues.", symbol, message), "high", "warning")
+	if a.researchIncident {
+		return
+	}
+	a.researchIncident = true
+	a.notifier.BestEffort("Research Data Degraded", fmt.Sprintf("One or more paper markets are degraded.\nFirst detected: %s - %s\nFurther per-market alerts are suppressed. BTC/ETH live reconciliation continues.", symbol, message), "high", "warning")
 }
 
 func (a *app) clearResearchIssue(now time.Time, symbol string) {
@@ -305,13 +305,18 @@ func (a *app) clearResearchIssue(now time.Time, symbol string) {
 	}
 	delete(a.researchIssues, symbol)
 	_ = a.events.Append("runtime_research_health", map[string]any{"timestamp": now, "symbol": symbol, "status": "RECOVERED", "strategy_version": strategyVersion, "runtime_version": execution.LifecycleVersion})
-	a.notifier.BestEffort("Research Market Recovered", symbol+" paper runtime is healthy again.", "default", "white_check_mark")
+	if len(a.researchIssues) != 0 || !a.researchIncident {
+		return
+	}
+	a.researchIncident = false
+	a.notifier.BestEffort("Research Data Recovered", "All paper-market research checks are healthy again.", "default", "white_check_mark")
 }
 
 func (a *app) notifyDegraded(now time.Time, err error) {
 	key, message := runtimeErrorSummary(err)
-	shouldAlert := !a.degraded || key != a.lastAlertKey || now.Sub(a.lastAlertAt) >= 15*time.Minute
+	shouldAlert := !a.degraded || now.Sub(a.lastAlertAt) >= time.Hour
 	a.degraded = true
+	a.healthySince = time.Time{}
 	if !shouldAlert {
 		return
 	}
@@ -319,11 +324,19 @@ func (a *app) notifyDegraded(now time.Time, err error) {
 	a.notifier.BestEffort("Overnight Runtime Degraded", message+"\nTrading state preserved; retrying automatically.", "urgent", "warning")
 }
 
-func (a *app) notifyRecovered() {
+func (a *app) notifyRecovered(now time.Time) {
 	if !a.degraded {
 		return
 	}
+	if a.healthySince.IsZero() {
+		a.healthySince = now
+		return
+	}
+	if now.Sub(a.healthySince) < 5*time.Minute {
+		return
+	}
 	a.degraded = false
+	a.healthySince = time.Time{}
 	a.notifier.BestEffort("Overnight Runtime Recovered", "Lighter connectivity and runtime reconciliation are healthy again.", "high", "white_check_mark")
 }
 

@@ -10,6 +10,8 @@ import (
 	adapter "github.com/ogtrading/lighter-adapter/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/execution"
 	"github.com/ogtrading/overnight-strategy/internal/lighterexec"
+	"github.com/ogtrading/overnight-strategy/internal/notify"
+	"github.com/ogtrading/overnight-strategy/internal/store"
 )
 
 func TestLiveAssetMinimumIsSkippableAndDoesNotBecomeSubmissionFailure(t *testing.T) {
@@ -114,5 +116,46 @@ func TestNextPlanUTC(t *testing.T) {
 	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
 	if got := nextPlanUTC(now, location); !got.Equal(time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("next plan=%s", got)
+	}
+}
+
+func TestResearchAlertsStayInOneIncidentUntilEveryMarketRecovers(t *testing.T) {
+	events, err := store.NewJSONL(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &app{events: events, notifier: notify.New("", nil), researchIssues: map[string]string{}}
+	now := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	a.recordResearchIssue(now, "LINK", errors.New("below minimum"))
+	a.recordResearchIssue(now.Add(time.Minute), "ZEC", errors.New("below minimum"))
+	if !a.researchIncident || len(a.researchIssues) != 2 {
+		t.Fatalf("incident=%v issues=%v", a.researchIncident, a.researchIssues)
+	}
+	a.clearResearchIssue(now.Add(2*time.Minute), "LINK")
+	if !a.researchIncident {
+		t.Fatal("incident cleared while ZEC remained degraded")
+	}
+	a.clearResearchIssue(now.Add(3*time.Minute), "ZEC")
+	if a.researchIncident || len(a.researchIssues) != 0 {
+		t.Fatalf("incident=%v issues=%v", a.researchIncident, a.researchIssues)
+	}
+}
+
+func TestRuntimeAlertIgnoresKeyChurnAndDebouncesRecovery(t *testing.T) {
+	a := &app{notifier: notify.New("", nil)}
+	now := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	a.notifyDegraded(now, errors.New("first failure"))
+	a.notifyDegraded(now.Add(time.Minute), errors.New("different failure"))
+	if !a.lastAlertAt.Equal(now) {
+		t.Fatalf("key churn advanced alert time to %s", a.lastAlertAt)
+	}
+	a.notifyRecovered(now.Add(2 * time.Minute))
+	a.notifyRecovered(now.Add(6 * time.Minute))
+	if !a.degraded {
+		t.Fatal("runtime recovered before five stable minutes")
+	}
+	a.notifyRecovered(now.Add(7 * time.Minute))
+	if a.degraded {
+		t.Fatal("runtime did not recover after five stable minutes")
 	}
 }
