@@ -1,0 +1,21 @@
+[Unit]
+Description=Market Data Oracle - read-only dataset API
+Wants=network-online.target
+After=local-fs.target lightercollector.service
+
+[Service]
+Type=simple
+User=traderbot
+Group=traderbot
+ExecStart=/opt/overnight-strategy/current/bin/oracleapi -root /mnt/trading/recorder/lighter -listen 127.0.0.1:8083
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/mnt/trading/recorder/lighter
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
