@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "overnight-oracle/cloud-verification/v2",
+  "type": "object",
+  "required": ["schema_version", "provider", "package_id", "status", "checksum_status", "validated_at", "object_uri", "object_version", "local_deletion_eligible"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "provider": {"enum": ["AWS_S3", "GCP_GCS", "AZURE_BLOB", "S3_COMPATIBLE"]},
+    "package_id": {"type": "string", "minLength": 1},
+    "status": {"const": "VALID"},
+    "checksum_status": {"const": "PASS"},
+    "validated_at": {"type": "string", "format": "date-time"},
+    "object_uri": {"type": "string", "minLength": 1},
+    "object_version": {"type": "string", "minLength": 1},
+    "local_deletion_eligible": {"const": true}
+  },
+  "additionalProperties": true
+}

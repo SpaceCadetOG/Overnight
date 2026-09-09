@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -104,6 +105,20 @@ func TestServerErrorForcesReconnect(t *testing.T) {
 	err := c.record([]byte(`{"error":{"code":30009,"message":"Too Many Websocket Messages!"}}`))
 	if err == nil || !strings.Contains(err.Error(), "30009") {
 		t.Fatalf("expected websocket error, got %v", err)
+	}
+}
+
+func TestDisconnectCategories(t *testing.T) {
+	cases := map[string]string{
+		"read tcp: connection reset by peer": "PEER_RESET",
+		"websocket: i/o timeout":             "READ_TIMEOUT",
+		"order-book nonce gap":               "SEQUENCE_GAP",
+		"Lighter websocket error code=1":     "VENUE_ERROR",
+	}
+	for message, want := range cases {
+		if got := disconnectCategory(fmt.Errorf("%s", message)); got != want {
+			t.Fatalf("category=%s want=%s message=%s", got, want, message)
+		}
 	}
 }
 

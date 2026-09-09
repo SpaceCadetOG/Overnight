@@ -30,4 +30,7 @@ func TestOfflineReplayCertificate(t *testing.T) {
 	if !cert.Pass || cert.Ready != 12 || cert.Expected != 12 || !cert.SnapshotComparisons {
 		t.Fatalf("cert=%+v", cert)
 	}
+	if cert.Classification != "CERTIFIED" || cert.TotalWindows != 12 || cert.CertifiedWindows != 12 {
+		t.Fatalf("window certification=%+v", cert)
+	}
 }

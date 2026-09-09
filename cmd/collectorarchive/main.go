@@ -34,27 +34,34 @@ type fileManifest struct {
 }
 
 type manifest struct {
-	Schema            int            `json:"schema_version"`
-	PackageID         string         `json:"package_id"`
-	PriorPackageID    string         `json:"prior_package_id,omitempty"`
-	CollectorVersion  string         `json:"collector_version"`
-	CollectorCommit   string         `json:"collector_commit"`
-	Exchange          string         `json:"exchange"`
-	Date              string         `json:"date"`
-	Timezone          string         `json:"timezone"`
-	GeneratedAt       time.Time      `json:"generated_at"`
-	Files             []fileManifest `json:"files"`
-	Records           uint64         `json:"records"`
-	RawBytes          int64          `json:"raw_bytes"`
-	NonceGaps         uint64         `json:"nonce_gaps"`
-	WSErrors          uint64         `json:"websocket_errors"`
-	Reconnects        uint64         `json:"reconnects"`
-	FirstEvent        time.Time      `json:"first_event,omitempty"`
-	LastEvent         time.Time      `json:"last_event,omitempty"`
-	Assets            []string       `json:"assets"`
-	Missing           []string       `json:"missing_assets,omitempty"`
-	Complete          bool           `json:"complete"`
-	RecorderCertified bool           `json:"recorder_certified"`
+	Schema                 int               `json:"schema_version"`
+	PackageID              string            `json:"package_id"`
+	PriorPackageID         string            `json:"prior_package_id,omitempty"`
+	CollectorVersion       string            `json:"collector_version"`
+	CollectorCommit        string            `json:"collector_commit"`
+	Exchange               string            `json:"exchange"`
+	Date                   string            `json:"date"`
+	Timezone               string            `json:"timezone"`
+	GeneratedAt            time.Time         `json:"generated_at"`
+	Files                  []fileManifest    `json:"files"`
+	Records                uint64            `json:"records"`
+	RawBytes               int64             `json:"raw_bytes"`
+	NonceGaps              uint64            `json:"nonce_gaps"`
+	WSErrors               uint64            `json:"websocket_errors"`
+	Reconnects             uint64            `json:"reconnects"`
+	FirstEvent             time.Time         `json:"first_event,omitempty"`
+	LastEvent              time.Time         `json:"last_event,omitempty"`
+	Assets                 []string          `json:"assets"`
+	Missing                []string          `json:"missing_assets,omitempty"`
+	Complete               bool              `json:"complete"`
+	RecorderCertified      bool              `json:"recorder_certified"`
+	CertificationClass     string            `json:"certification_class"`
+	CertifiedWindows       int               `json:"certified_windows"`
+	TotalWindows           int               `json:"total_windows"`
+	UncertainIntervals     uint64            `json:"uncertain_intervals"`
+	UncertainMillis        int64             `json:"uncertain_interval_ms"`
+	LongestUncertainMillis int64             `json:"longest_uncertain_interval_ms"`
+	DisconnectReasons      map[string]uint64 `json:"disconnect_reasons,omitempty"`
 }
 
 func expectedAssets() []string {
@@ -96,7 +103,7 @@ func main() {
 		}
 		fatal(fmt.Errorf("no JSONL files in %s", dir))
 	}
-	m := manifest{Schema: 3, PackageID: "lighter-" + *day, Exchange: "lighter", Date: *day, Timezone: location.String(), GeneratedAt: time.Now().UTC(), CollectorVersion: buildinfo.Version, CollectorCommit: buildinfo.Commit}
+	m := manifest{Schema: 4, PackageID: "lighter-" + *day, Exchange: "lighter", Date: *day, Timezone: location.String(), GeneratedAt: time.Now().UTC(), CollectorVersion: buildinfo.Version, CollectorCommit: buildinfo.Commit, DisconnectReasons: map[string]uint64{}}
 	seenAssets := map[string]bool{}
 	seenBooks := map[string]bool{}
 	for _, path := range entries {
@@ -131,6 +138,18 @@ func main() {
 		}
 		if strings.HasSuffix(info.Path, "collector_reconnects.jsonl") {
 			m.Reconnects += info.Records
+			intervals, total, longest, reasons, err := inspectReconnects(path)
+			if err != nil {
+				fatal(err)
+			}
+			m.UncertainIntervals += intervals
+			m.UncertainMillis += total
+			if longest > m.LongestUncertainMillis {
+				m.LongestUncertainMillis = longest
+			}
+			for reason, count := range reasons {
+				m.DisconnectReasons[reason] += count
+			}
 		}
 		info.Path += ".zst"
 		m.Files = append(m.Files, info)
@@ -169,12 +188,72 @@ func main() {
 		digest, _ := checksum(certPath)
 		m.Files = append(m.Files, fileManifest{Path: "RECORDER_CERTIFICATE.json", Compressed: int64(len(body)), RawBytes: int64(len(body)), Records: 1, SHA256: digest})
 		m.RecorderCertified = certificate.Pass
+		m.CertificationClass = certificate.Classification
+		m.CertifiedWindows = certificate.CertifiedWindows
+		m.TotalWindows = certificate.TotalWindows
 	}
 	m.Complete = len(m.Missing) == 0 && m.NonceGaps == 0 && m.WSErrors == 0 && coverageComplete && m.RecorderCertified && certErr == nil && m.CollectorCommit != "" && m.CollectorCommit != "unknown"
 	if err := writeOutputs(dir, m); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("archived date=%s files=%d records=%d raw_bytes=%d nonce_gaps=%d\n", m.Date, len(m.Files), m.Records, m.RawBytes, m.NonceGaps)
+}
+
+func inspectReconnects(path string) (uint64, int64, int64, map[string]uint64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	defer file.Close()
+	reasons := map[string]uint64{}
+	var intervals uint64
+	var total, longest int64
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var row struct {
+			Uncertain int64  `json:"uncertain_interval_ms"`
+			Legacy    int64  `json:"outage_duration_ms"`
+			Category  string `json:"reason_category"`
+			Error     string `json:"error"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return 0, 0, 0, nil, err
+		}
+		duration := row.Uncertain
+		if duration == 0 {
+			duration = row.Legacy
+		}
+		category := row.Category
+		if category == "" {
+			category = legacyDisconnectCategory(row.Error)
+		}
+		intervals++
+		total += duration
+		if duration > longest {
+			longest = duration
+		}
+		reasons[category]++
+	}
+	return intervals, total, longest, reasons, scanner.Err()
+}
+
+func legacyDisconnectCategory(value string) string {
+	value = strings.ToLower(value)
+	switch {
+	case strings.Contains(value, "timeout"):
+		return "READ_TIMEOUT"
+	case strings.Contains(value, "reset by peer"):
+		return "PEER_RESET"
+	case strings.Contains(value, "close 1000"):
+		return "NORMAL_CLOSE"
+	case strings.Contains(value, "nonce gap"):
+		return "SEQUENCE_GAP"
+	case value == "" || value == "connection_closed":
+		return "CONNECTION_CLOSED"
+	default:
+		return "TRANSPORT_ERROR"
+	}
 }
 
 func collectJSONL(root string) ([]string, error) {

@@ -137,7 +137,7 @@ func (s *service) validate(ctx context.Context, bucket, key, version string, eve
 	if err != nil {
 		return err
 	}
-	ack, _ := json.Marshal(map[string]any{"package_id": manifest.PackageID, "status": "VALID", "validated_at": validated, "shadow_only": true})
+	ack, _ := json.Marshal(map[string]any{"schema_version": 2, "provider": "AWS_S3", "package_id": manifest.PackageID, "status": "VALID", "checksum_status": "PASS", "validated_at": validated, "object_uri": "s3://" + bucket + "/" + key, "object_version": version, "source_bucket": bucket, "manifest_key": key, "manifest_object_version": version, "raw_prefix": strings.TrimSuffix(s.rawPrefix, "/") + "/" + strings.TrimPrefix(prefix, s.landingPrefix), "shadow_only": true, "local_deletion_eligible": true})
 	if _, err := s.s3.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(strings.TrimSuffix(s.landingPrefix, "/") + "/acknowledgements/" + manifest.PackageID + ".json"), Body: strings.NewReader(string(ack)), ContentType: aws.String("application/json")}); err != nil {
 		return err
 	}

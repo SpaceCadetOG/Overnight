@@ -16,22 +16,36 @@ import (
 )
 
 type AssetResult struct {
-	Symbol      string          `json:"symbol"`
-	Snapshot    bool            `json:"snapshot"`
-	Events      uint64          `json:"events"`
-	FirstEvent  time.Time       `json:"first_event"`
-	LastEvent   time.Time       `json:"last_event"`
-	FinalNonce  int64           `json:"final_nonce"`
-	BestBid     float64         `json:"best_bid"`
-	BestAsk     float64         `json:"best_ask"`
-	Checkpoints int             `json:"checkpoints"`
-	Compared    int             `json:"compared"`
-	Gaps        uint64          `json:"nonce_gaps"`
-	Crossed     uint64          `json:"crossed_books"`
-	Invalid     uint64          `json:"invalid_levels"`
-	Streams     map[string]bool `json:"streams"`
-	Pass        bool            `json:"pass"`
-	Issues      []string        `json:"issues,omitempty"`
+	Symbol           string          `json:"symbol"`
+	Snapshot         bool            `json:"snapshot"`
+	Events           uint64          `json:"events"`
+	FirstEvent       time.Time       `json:"first_event"`
+	LastEvent        time.Time       `json:"last_event"`
+	FinalNonce       int64           `json:"final_nonce"`
+	BestBid          float64         `json:"best_bid"`
+	BestAsk          float64         `json:"best_ask"`
+	Checkpoints      int             `json:"checkpoints"`
+	Compared         int             `json:"compared"`
+	Gaps             uint64          `json:"nonce_gaps"`
+	Crossed          uint64          `json:"crossed_books"`
+	Invalid          uint64          `json:"invalid_levels"`
+	Streams          map[string]bool `json:"streams"`
+	Pass             bool            `json:"pass"`
+	Issues           []string        `json:"issues,omitempty"`
+	Windows          []WindowResult  `json:"windows,omitempty"`
+	CertifiedWindows int             `json:"certified_windows"`
+}
+type WindowResult struct {
+	ConnectionID  string    `json:"connection_id,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	EndedAt       time.Time `json:"ended_at"`
+	FirstNonce    int64     `json:"first_nonce"`
+	LastNonce     int64     `json:"last_nonce"`
+	Events        uint64    `json:"events"`
+	NonceGaps     uint64    `json:"nonce_gaps"`
+	CrossedBooks  uint64    `json:"crossed_books"`
+	InvalidLevels uint64    `json:"invalid_levels"`
+	Certified     bool      `json:"certified"`
 }
 type Certificate struct {
 	SchemaVersion                          int           `json:"schema_version"`
@@ -40,9 +54,12 @@ type Certificate struct {
 	Ready                                  int           `json:"ready"`
 	Expected                               int           `json:"expected"`
 	NonceGaps, CrossedBooks, InvalidLevels uint64
-	SnapshotComparisons                    bool `json:"snapshot_comparisons"`
-	DailyCoverage                          bool `json:"daily_coverage"`
-	Pass                                   bool `json:"pass"`
+	SnapshotComparisons                    bool   `json:"snapshot_comparisons"`
+	DailyCoverage                          bool   `json:"daily_coverage"`
+	Pass                                   bool   `json:"pass"`
+	Classification                         string `json:"classification"`
+	CertifiedWindows                       int    `json:"certified_windows"`
+	TotalWindows                           int    `json:"total_windows"`
 }
 type book struct {
 	bids, asks map[string]float64
@@ -69,6 +86,8 @@ func Certify(dir string, expected []string) (Certificate, error) {
 		cert.NonceGaps += result.Gaps
 		cert.CrossedBooks += result.Crossed
 		cert.InvalidLevels += result.Invalid
+		cert.CertifiedWindows += result.CertifiedWindows
+		cert.TotalWindows += len(result.Windows)
 		if result.Compared != result.Checkpoints || result.Checkpoints == 0 {
 			cert.SnapshotComparisons = false
 		}
@@ -78,6 +97,14 @@ func Certify(dir string, expected []string) (Certificate, error) {
 		cert.Assets = append(cert.Assets, result)
 	}
 	cert.Pass = cert.Ready == cert.Expected && cert.NonceGaps == 0 && cert.CrossedBooks == 0 && cert.InvalidLevels == 0 && cert.SnapshotComparisons && cert.DailyCoverage
+	switch {
+	case cert.Pass:
+		cert.Classification = "CERTIFIED"
+	case cert.CertifiedWindows > 0:
+		cert.Classification = "CERTIFIED_WITH_EXCLUDED_INTERVALS"
+	default:
+		cert.Classification = "QUARANTINED"
+	}
 	return cert, nil
 }
 
@@ -111,10 +138,23 @@ func certifyAsset(dir, symbol string) (AssetResult, error) {
 	}
 	b := book{bids: map[string]float64{}, asks: map[string]float64{}}
 	observed := map[int64][2]float64{}
+	var window *WindowResult
+	closeWindow := func() {
+		if window == nil {
+			return
+		}
+		window.Certified = window.Events > 0 && window.NonceGaps == 0 && window.CrossedBooks == 0 && window.InvalidLevels == 0
+		r.Windows = append(r.Windows, *window)
+		if window.Certified {
+			r.CertifiedWindows++
+		}
+		window = nil
+	}
 	err := scan(findFile(dir, "orderbook_events"), func(line []byte) error {
 		var row struct {
-			ReceivedAt time.Time      `json:"received_at"`
-			Event      map[string]any `json:"event"`
+			ReceivedAt   time.Time      `json:"received_at"`
+			ConnectionID string         `json:"connection_id"`
+			Event        map[string]any `json:"event"`
 		}
 		if err := json.Unmarshal(line, &row); err != nil {
 			return err
@@ -128,30 +168,50 @@ func certifyAsset(dir, symbol string) (AssetResult, error) {
 		begin, end := i64(ob["begin_nonce"]), i64(ob["nonce"])
 		snap := typ == "subscribed/order_book"
 		if snap {
+			closeWindow()
+			window = &WindowResult{ConnectionID: row.ConnectionID, StartedAt: row.ReceivedAt, EndedAt: row.ReceivedAt, FirstNonce: end, LastNonce: end}
 			b = book{bids: map[string]float64{}, asks: map[string]float64{}, snapshot: true}
 		} else if !b.snapshot {
 			return fmt.Errorf("delta before snapshot")
 		}
 		if !snap && b.nonce > 0 && begin != b.nonce {
 			r.Gaps++
+			if window != nil {
+				window.NonceGaps++
+			}
 		}
 		if err := levels(b.asks, ob["asks"]); err != nil {
 			r.Invalid++
+			if window != nil {
+				window.InvalidLevels++
+			}
 		}
 		if err := levels(b.bids, ob["bids"]); err != nil {
 			r.Invalid++
+			if window != nil {
+				window.InvalidLevels++
+			}
 		}
 		b.nonce = end
 		r.Events++
+		if window != nil {
+			window.Events++
+			window.EndedAt = row.ReceivedAt
+			window.LastNonce = end
+		}
 		bid, ask := best(b)
 		if bid > 0 && ask > 0 && bid >= ask {
 			r.Crossed++
+			if window != nil {
+				window.CrossedBooks++
+			}
 		}
 		if _, ok := checkpoints[end]; ok {
 			observed[end] = [2]float64{bid, ask}
 		}
 		return nil
 	})
+	closeWindow()
 	if err != nil {
 		return r, err
 	}

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,6 +30,9 @@ type Status struct {
 	InvalidLevels         uint64    `json:"invalid_levels"`
 	ConfirmedLiquidations uint64    `json:"confirmed_liquidations"`
 	InferredCascades      uint64    `json:"inferred_liquidation_cascades"`
+	ConnectionID          string    `json:"connection_id,omitempty"`
+	ConnectionStartedAt   time.Time `json:"connection_started_at,omitempty"`
+	LastRecoveryAt        time.Time `json:"last_recovery_at,omitempty"`
 }
 
 type StatusView struct {
@@ -44,12 +48,15 @@ type StatusView struct {
 	InvalidLevels         uint64    `json:"invalid_levels"`
 	ConfirmedLiquidations uint64    `json:"confirmed_liquidations"`
 	InferredCascades      uint64    `json:"inferred_liquidation_cascades"`
+	ConnectionID          string    `json:"connection_id,omitempty"`
+	ConnectionStartedAt   time.Time `json:"connection_started_at,omitempty"`
+	LastRecoveryAt        time.Time `json:"last_recovery_at,omitempty"`
 }
 
 func (s *Status) Snapshot() StatusView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return StatusView{Connected: s.Connected, LastEvent: s.LastEvent, LastError: s.LastError, Events: s.Events, NonceGaps: s.NonceGaps, Reconnects: s.Reconnects, BooksReady: s.BooksReady, Snapshots: s.Snapshots, CrossedBooks: s.CrossedBooks, InvalidLevels: s.InvalidLevels, ConfirmedLiquidations: s.ConfirmedLiquidations, InferredCascades: s.InferredCascades}
+	return StatusView{Connected: s.Connected, LastEvent: s.LastEvent, LastError: s.LastError, Events: s.Events, NonceGaps: s.NonceGaps, Reconnects: s.Reconnects, BooksReady: s.BooksReady, Snapshots: s.Snapshots, CrossedBooks: s.CrossedBooks, InvalidLevels: s.InvalidLevels, ConfirmedLiquidations: s.ConfirmedLiquidations, InferredCascades: s.InferredCascades, ConnectionID: s.ConnectionID, ConnectionStartedAt: s.ConnectionStartedAt, LastRecoveryAt: s.LastRecoveryAt}
 }
 
 type Collector struct {
@@ -62,6 +69,9 @@ type Collector struct {
 	marketIDs      map[string]string
 	lastCheckpoint map[string]time.Time
 	flow           *liquidationCorrelator
+	connectionID   string
+	connectionLast time.Time
+	recoveryLogged bool
 }
 
 type orderBook struct {
@@ -94,6 +104,7 @@ func (c *Collector) Run(ctx context.Context) error {
 		before := c.Status.Snapshot().Events
 		err := c.runOnce(ctx)
 		outageStarted := time.Now().UTC()
+		statusBefore := c.Status.Snapshot()
 		c.Status.mu.Lock()
 		c.Status.Connected = false
 		if err != nil && err != context.Canceled {
@@ -120,9 +131,42 @@ func (c *Collector) Run(ctx context.Context) error {
 		case <-time.After(delay):
 		}
 		outageEnded := time.Now().UTC()
-		_ = c.Store.Append("collector_reconnects", map[string]any{"recorded_at": outageEnded, "outage_started_at": outageStarted, "outage_ended_at": outageEnded, "outage_duration_ms": outageEnded.Sub(outageStarted).Milliseconds(), "reconnect": reconnects, "error": errorString(err), "books_ready_after_disconnect": 0, "requires_fresh_snapshots": true})
+		uncertainStarted := statusBefore.LastEvent
+		if uncertainStarted.IsZero() || uncertainStarted.After(outageStarted) {
+			uncertainStarted = outageStarted
+		}
+		_ = c.Store.Append("collector_reconnects", map[string]any{"schema_version": 2, "recorded_at": outageEnded, "connection_id": statusBefore.ConnectionID, "connection_started_at": statusBefore.ConnectionStartedAt, "last_event_at": statusBefore.LastEvent, "disconnect_detected_at": outageStarted, "reconnect_started_at": outageStarted, "reconnect_attempt_ended_at": outageEnded, "uncertain_interval_started_at": uncertainStarted, "uncertain_interval_ended_at": outageEnded, "uncertain_interval_ms": outageEnded.Sub(uncertainStarted).Milliseconds(), "retry_delay_ms": outageEnded.Sub(outageStarted).Milliseconds(), "reconnect": reconnects, "reason_category": disconnectCategory(err), "error": errorString(err), "books_ready_after_disconnect": 0, "requires_fresh_snapshots": true})
 	}
 	return ctx.Err()
+}
+
+func disconnectCategory(err error) string {
+	if err == nil {
+		return "CONNECTION_CLOSED"
+	}
+	value := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(value, "context canceled"):
+		return "SHUTDOWN"
+	case strings.Contains(value, "nonce gap"):
+		return "SEQUENCE_GAP"
+	case strings.Contains(value, "timeout"):
+		return "READ_TIMEOUT"
+	case strings.Contains(value, "reset by peer"):
+		return "PEER_RESET"
+	case strings.Contains(value, "close 1000"):
+		return "NORMAL_CLOSE"
+	case strings.Contains(value, "websocket error"):
+		return "VENUE_ERROR"
+	default:
+		return "TRANSPORT_ERROR"
+	}
+}
+
+func newConnectionID(at time.Time) string {
+	var random [8]byte
+	_, _ = rand.Read(random[:])
+	return fmt.Sprintf("conn_%d_%x", at.UnixMilli(), random[:])
 }
 
 func errorString(err error) string {
@@ -152,7 +196,14 @@ func (c *Collector) runOnce(ctx context.Context) error {
 	c.lastNonce = map[string]int64{}
 	c.lastCheckpoint = map[string]time.Time{}
 	connectionStarted := time.Now().UTC()
-	_ = c.Store.Append("collector_connections", map[string]any{"recorded_at": connectionStarted, "connection_started_at": connectionStarted, "state": "RESYNCING", "books_ready": 0})
+	c.connectionID = newConnectionID(connectionStarted)
+	c.connectionLast = time.Time{}
+	c.recoveryLogged = false
+	c.Status.mu.Lock()
+	c.Status.ConnectionID = c.connectionID
+	c.Status.ConnectionStartedAt = connectionStarted
+	c.Status.mu.Unlock()
+	_ = c.Store.Append("collector_connections", map[string]any{"schema_version": 2, "recorded_at": connectionStarted, "connection_id": c.connectionID, "connection_started_at": connectionStarted, "state": "RESYNCING", "books_ready": 0})
 	const subscriptionDelay = 350 * time.Millisecond // below Lighter's 200 client messages/minute limit
 	subscribe := func(channel string) error {
 		if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel": channel}); err != nil {
@@ -205,7 +256,8 @@ func (c *Collector) record(message []byte) error {
 		channel = fmt.Sprint(envelope["type"])
 	}
 	stream := c.recordStream(channel)
-	record := map[string]any{"received_at": time.Now().UTC(), "channel": channel, "event": envelope}
+	receivedAt := time.Now().UTC()
+	record := map[string]any{"schema_version": 2, "received_at": receivedAt, "connection_id": c.connectionID, "connection_started_at": c.Status.Snapshot().ConnectionStartedAt, "channel": channel, "event": envelope}
 	if err := c.Store.Append(stream, record); err != nil {
 		return err
 	}
@@ -244,8 +296,9 @@ func (c *Collector) record(message []byte) error {
 	}
 	c.Status.mu.Lock()
 	c.Status.Events++
-	c.Status.LastEvent = time.Now().UTC()
+	c.Status.LastEvent = receivedAt
 	c.Status.mu.Unlock()
+	c.connectionLast = receivedAt
 	return nil
 }
 
@@ -309,10 +362,17 @@ func (c *Collector) applyOrderBook(channel string, eventType any, payload map[st
 		if symbol != "" {
 			stream = "asset=" + symbol + "/" + stream
 		}
-		if err := c.Store.Append(stream, map[string]any{"schema_version": 1, "recorded_at": now, "channel": channel, "symbol": symbol, "nonce": nonce, "best_bid": bestBid, "best_ask": bestAsk, "bid_levels": len(book.Bids), "ask_levels": len(book.Asks)}); err != nil {
+		if err := c.Store.Append(stream, map[string]any{"schema_version": 2, "recorded_at": now, "connection_id": c.connectionID, "channel": channel, "symbol": symbol, "nonce": nonce, "best_bid": bestBid, "best_ask": bestAsk, "bid_levels": len(book.Bids), "ask_levels": len(book.Asks)}); err != nil {
 			return err
 		}
 		c.lastCheckpoint[channel] = now
+	}
+	if snapshot && !c.recoveryLogged && c.Status.Snapshot().BooksReady == len(universe.All()) {
+		c.recoveryLogged = true
+		c.Status.mu.Lock()
+		c.Status.LastRecoveryAt = now
+		c.Status.mu.Unlock()
+		_ = c.Store.Append("collector_recovery_windows", map[string]any{"schema_version": 1, "recorded_at": now, "connection_id": c.connectionID, "connection_started_at": c.Status.Snapshot().ConnectionStartedAt, "all_books_ready_at": now, "recovery_duration_ms": now.Sub(c.Status.Snapshot().ConnectionStartedAt).Milliseconds(), "books_ready": len(universe.All()), "fresh_snapshots_verified": true})
 	}
 	return nil
 }

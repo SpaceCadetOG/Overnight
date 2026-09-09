@@ -37,7 +37,7 @@ attempt=0
 ack="landing/acknowledgements/$package_id.json"
 while [ "$attempt" -lt 60 ]; do
     if aws s3 cp "s3://$bucket/$ack" "$package/CLOUD_VERIFIED.json.tmp" --only-show-errors 2>/dev/null; then
-        if jq -e '.status == "VALID" and .shadow_only == true' "$package/CLOUD_VERIFIED.json.tmp" >/dev/null; then
+        if jq -e --arg package "$package_id" '.schema_version >= 2 and .provider == "AWS_S3" and .package_id == $package and .status == "VALID" and .checksum_status == "PASS" and (.object_uri | length) > 0 and (.object_version | length) > 0 and .local_deletion_eligible == true and .shadow_only == true' "$package/CLOUD_VERIFIED.json.tmp" >/dev/null; then
             mv "$package/CLOUD_VERIFIED.json.tmp" "$package/CLOUD_VERIFIED.json"
             printf '%s\n' "AWS validation acknowledged package=$package_id"
             exit 0
