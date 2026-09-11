@@ -10,11 +10,15 @@ Group=traderbot
 ExecStart=/opt/overnight-strategy/current/bin/oracleapi -root /mnt/trading/recorder/lighter -listen 127.0.0.1:8083
 Restart=always
 RestartSec=5
+UnsetEnvironment=LIGHTER_ACCOUNT_INDEX LIGHTER_API_KEY_INDEX LIGHTER_API_PRIVATE_KEY LIGHTER_AUTH_TOKEN LIGHTER_EXECUTOR_TOKEN
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/mnt/trading/recorder/lighter
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
 UMask=0077
 
 [Install]

@@ -10,7 +10,7 @@ fi
 root=/opt/overnight-strategy
 current="$root/current"
 previous="$root/previous"
-required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime recordercert"
+required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime oracleapi recordercert"
 
 mkdir -p "$root/releases" /var/lib/overnight
 exec 9>"$root/deploy-lock"
@@ -47,7 +47,8 @@ install -d -m 0755 /etc/systemd/journald.conf.d
 install -m 0644 "$current/journald/overnight.conf" /etc/systemd/journald.conf.d/overnight.conf
 systemctl daemon-reload
 systemctl enable overnight-recorder.target overnight-trading.target overnight-operations.target
-systemctl enable lightercollector.service traderuntime.service dailyplans.timer dailylevels.timer dailyreport.timer eodexport.timer lighterarchive.timer overnight-health.timer overnight-disk-guard.timer
+systemctl enable lightercollector.service traderuntime.service oracleapi.service dailyplans.timer dailylevels.timer dailyreport.timer eodexport.timer lighterarchive.timer overnight-health.timer overnight-disk-guard.timer
 systemctl restart lightercollector.service
 systemctl restart traderuntime.service
+systemctl restart oracleapi.service
 systemctl restart dailyplans.timer dailylevels.timer dailyreport.timer eodexport.timer lighterarchive.timer overnight-health.timer overnight-disk-guard.timer
