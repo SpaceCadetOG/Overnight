@@ -77,6 +77,7 @@ func main() {
 	root := flag.String("root", "/mnt/trading/recorder/lighter", "collector storage root")
 	day := flag.String("date", "", "Chicago date to archive (YYYY-MM-DD)")
 	removeRaw := flag.Bool("remove-raw", true, "remove JSONL after verified compression")
+	recertify := flag.Bool("recertify", false, "rebuild certificate and manifest quality fields for an existing sealed archive")
 	flag.Parse()
 	if *day == "" {
 		fatal(fmt.Errorf("date is required"))
@@ -92,6 +93,13 @@ func main() {
 		fatal(fmt.Errorf("date must be a closed Chicago calendar day"))
 	}
 	dir := filepath.Join(*root, "date="+*day)
+	if *recertify {
+		if err := recertifyArchive(dir); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("recertified date=%s\n", *day)
+		return
+	}
 	entries, err := collectJSONL(dir)
 	if err != nil {
 		fatal(err)
@@ -197,6 +205,60 @@ func main() {
 		fatal(err)
 	}
 	fmt.Printf("archived date=%s files=%d records=%d raw_bytes=%d nonce_gaps=%d\n", m.Date, len(m.Files), m.Records, m.RawBytes, m.NonceGaps)
+}
+
+func recertifyArchive(dir string) error {
+	body, err := os.ReadFile(filepath.Join(dir, "MANIFEST.json"))
+	if err != nil {
+		return fmt.Errorf("read existing manifest: %w", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(body, &m); err != nil {
+		return fmt.Errorf("decode existing manifest: %w", err)
+	}
+	certificate, err := recordercert.Certify(dir, expectedAssets())
+	if err != nil {
+		return err
+	}
+	certificateBody, err := json.MarshalIndent(certificate, "", "  ")
+	if err != nil {
+		return err
+	}
+	certificateBody = append(certificateBody, '\n')
+	certificatePath := filepath.Join(dir, "RECORDER_CERTIFICATE.json")
+	temporary := certificatePath + ".tmp"
+	if err := os.WriteFile(temporary, certificateBody, 0o640); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, certificatePath); err != nil {
+		return err
+	}
+	digest, err := checksum(certificatePath)
+	if err != nil {
+		return err
+	}
+	updated := false
+	for index := range m.Files {
+		if m.Files[index].Path == "RECORDER_CERTIFICATE.json" {
+			m.Files[index].Compressed = int64(len(certificateBody))
+			m.Files[index].RawBytes = int64(len(certificateBody))
+			m.Files[index].Records = 1
+			m.Files[index].SHA256 = digest
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		m.Files = append(m.Files, fileManifest{Path: "RECORDER_CERTIFICATE.json", Compressed: int64(len(certificateBody)), RawBytes: int64(len(certificateBody)), Records: 1, SHA256: digest})
+	}
+	m.RecorderCertified = certificate.Pass
+	m.CertificationClass = certificate.Classification
+	m.CertifiedWindows = certificate.CertifiedWindows
+	m.TotalWindows = certificate.TotalWindows
+	// Full completeness requires an entirely reconstructable day. A package
+	// with an excluded pre-snapshot prefix remains partial by design.
+	m.Complete = m.Complete && certificate.Pass
+	return writeOutputs(dir, m)
 }
 
 func inspectReconnects(path string) (uint64, int64, int64, map[string]uint64, error) {

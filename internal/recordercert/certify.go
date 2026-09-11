@@ -16,24 +16,26 @@ import (
 )
 
 type AssetResult struct {
-	Symbol           string          `json:"symbol"`
-	Snapshot         bool            `json:"snapshot"`
-	Events           uint64          `json:"events"`
-	FirstEvent       time.Time       `json:"first_event"`
-	LastEvent        time.Time       `json:"last_event"`
-	FinalNonce       int64           `json:"final_nonce"`
-	BestBid          float64         `json:"best_bid"`
-	BestAsk          float64         `json:"best_ask"`
-	Checkpoints      int             `json:"checkpoints"`
-	Compared         int             `json:"compared"`
-	Gaps             uint64          `json:"nonce_gaps"`
-	Crossed          uint64          `json:"crossed_books"`
-	Invalid          uint64          `json:"invalid_levels"`
-	Streams          map[string]bool `json:"streams"`
-	Pass             bool            `json:"pass"`
-	Issues           []string        `json:"issues,omitempty"`
-	Windows          []WindowResult  `json:"windows,omitempty"`
-	CertifiedWindows int             `json:"certified_windows"`
+	Symbol            string          `json:"symbol"`
+	Snapshot          bool            `json:"snapshot"`
+	Events            uint64          `json:"events"`
+	FirstEvent        time.Time       `json:"first_event"`
+	LastEvent         time.Time       `json:"last_event"`
+	FinalNonce        int64           `json:"final_nonce"`
+	BestBid           float64         `json:"best_bid"`
+	BestAsk           float64         `json:"best_ask"`
+	Checkpoints       int             `json:"checkpoints"`
+	Compared          int             `json:"compared"`
+	Gaps              uint64          `json:"nonce_gaps"`
+	Crossed           uint64          `json:"crossed_books"`
+	Invalid           uint64          `json:"invalid_levels"`
+	Streams           map[string]bool `json:"streams"`
+	Pass              bool            `json:"pass"`
+	Issues            []string        `json:"issues,omitempty"`
+	Windows           []WindowResult  `json:"windows,omitempty"`
+	CertifiedWindows  int             `json:"certified_windows"`
+	PreSnapshotEvents uint64          `json:"pre_snapshot_events,omitempty"`
+	FirstCertifiedAt  time.Time       `json:"first_certified_at,omitempty"`
 }
 type WindowResult struct {
 	ConnectionID  string    `json:"connection_id,omitempty"`
@@ -172,7 +174,13 @@ func certifyAsset(dir, symbol string) (AssetResult, error) {
 			window = &WindowResult{ConnectionID: row.ConnectionID, StartedAt: row.ReceivedAt, EndedAt: row.ReceivedAt, FirstNonce: end, LastNonce: end}
 			b = book{bids: map[string]float64{}, asks: map[string]float64{}, snapshot: true}
 		} else if !b.snapshot {
-			return fmt.Errorf("delta before snapshot")
+			// A Chicago-day archive can begin in the middle of a healthy
+			// WebSocket connection whose subscription snapshot was written to
+			// the preceding day. That prefix is not independently
+			// reconstructable, so exclude it and continue scanning until the
+			// first full snapshot starts a provable window.
+			r.PreSnapshotEvents++
+			return nil
 		}
 		if !snap && b.nonce > 0 && begin != b.nonce {
 			r.Gaps++
@@ -198,6 +206,9 @@ func certifyAsset(dir, symbol string) (AssetResult, error) {
 			window.Events++
 			window.EndedAt = row.ReceivedAt
 			window.LastNonce = end
+			if r.FirstCertifiedAt.IsZero() {
+				r.FirstCertifiedAt = row.ReceivedAt
+			}
 		}
 		bid, ask := best(b)
 		if bid > 0 && ask > 0 && bid >= ask {
@@ -226,7 +237,7 @@ func certifyAsset(dir, symbol string) (AssetResult, error) {
 	if r.FirstEvent.IsZero() || r.LastEvent.Sub(r.FirstEvent) < 23*time.Hour+50*time.Minute {
 		r.Issues = append(r.Issues, "daily coverage shorter than 23h50m")
 	}
-	r.Pass = r.Snapshot && r.Gaps == 0 && r.Crossed == 0 && r.Invalid == 0 && r.Checkpoints > 0 && r.Compared == r.Checkpoints && len(r.Issues) == 0
+	r.Pass = r.Snapshot && r.PreSnapshotEvents == 0 && r.Gaps == 0 && r.Crossed == 0 && r.Invalid == 0 && r.Checkpoints > 0 && r.Compared == r.Checkpoints && len(r.Issues) == 0
 	return r, nil
 }
 
