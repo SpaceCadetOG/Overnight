@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oracle.local/schemas/v1/event-envelope.schema.json",
+  "title": "Market Data Oracle Event Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "asset", "venue", "stream", "oracle_sequence", "oracle_received_at", "connection_id", "schema_version", "quality", "payload"],
+  "properties": {
+    "event_id": {"type": "string", "pattern": "^evt_[0-9a-f]{32}$"},
+    "asset": {"type": "string", "pattern": "^[A-Z0-9]{2,20}$"},
+    "venue": {"type": "string", "minLength": 1},
+    "stream": {"enum": ["instrument", "trade", "book_snapshot", "book_delta", "ticker", "confirmed_liquidation", "inferred_liquidation", "connection", "quality", "heartbeat"]},
+    "oracle_sequence": {"type": "integer", "minimum": 1},
+    "venue_sequence": {"type": "integer", "minimum": 0},
+    "exchange_timestamp": {"type": "string", "format": "date-time"},
+    "transaction_timestamp": {"type": "string", "format": "date-time"},
+    "oracle_received_at": {"type": "string", "format": "date-time"},
+    "connection_id": {"type": "string", "minLength": 1},
+    "schema_version": {"const": "oracle-event-v1"},
+    "quality": {"enum": ["CERTIFIED", "CERTIFIED_WITH_EXCLUDED_INTERVALS", "CHECKSUM_VERIFIED_UNCERTIFIED", "QUARANTINED", "UNAVAILABLE"]},
+    "payload": {"type": "object"}
+  }
+}

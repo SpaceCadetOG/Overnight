@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oracle.local/schemas/v1/book.schema.json",
+  "title": "Market Data Oracle Book Payload v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["begin_nonce", "nonce", "depth", "bids", "asks"],
+  "properties": {
+    "begin_nonce": {"type": "integer", "minimum": 0},
+    "nonce": {"type": "integer", "minimum": 1},
+    "depth": {"type": "integer", "minimum": 0},
+    "bids": {"$ref": "#/$defs/levels"},
+    "asks": {"$ref": "#/$defs/levels"}
+  },
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
+    "level": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["price", "size"],
+      "properties": {"price": {"$ref": "#/$defs/decimal"}, "size": {"$ref": "#/$defs/decimal"}}
+    },
+    "levels": {"type": "array", "items": {"$ref": "#/$defs/level"}}
+  }
+}
