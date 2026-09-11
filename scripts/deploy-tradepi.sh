@@ -9,7 +9,7 @@ release_id="$commit-$build_id"
 release_root=/opt/overnight-strategy/releases
 staging="$release_root/$release_id"
 temporary="$release_root/.staging-$release_id"
-required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime recordercert"
+required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime oracleapi recordercert"
 
 for binary in $required; do
     [ -x "$artifact_dir/bin/$binary" ] || {
@@ -23,6 +23,10 @@ done
 }
 [ -f "$artifact_dir/systemd/lightercollector.service" ] || {
     printf '%s\n' "release is missing systemd definitions" >&2
+    exit 1
+}
+[ -f "$artifact_dir/systemd/oracleapi.service" ] || {
+    printf '%s\n' "release is missing oracleapi.service" >&2
     exit 1
 }
 [ -x "$artifact_dir/scripts/archive-and-upload.sh" ] &&
@@ -45,7 +49,7 @@ ssh "$host" "sudo /opt/overnight-strategy/scripts/activate-release.sh '$release_
 
 attempt=0
 while [ "$attempt" -lt 30 ]; do
-    if ssh "$host" "curl --fail --silent http://127.0.0.1:8082/healthz | jq -e '.connected == true and .books_ready == 12 and .nonce_gaps == 0 and (.crossed_books // 0) == 0 and (.invalid_levels // 0) == 0' >/dev/null && systemctl is-active --quiet lightercollector.service traderuntime.service"; then
+    if ssh "$host" "curl --fail --silent http://127.0.0.1:8082/healthz | jq -e '.connected == true and .books_ready == 12 and .nonce_gaps == 0 and (.crossed_books // 0) == 0 and (.invalid_levels // 0) == 0' >/dev/null && curl --fail --silent http://127.0.0.1:8083/healthz | jq -e '.service == \"Market Data Oracle\" and .mode == \"read-only\"' >/dev/null && systemctl is-active --quiet lightercollector.service traderuntime.service oracleapi.service && ss -H -ltn 'sport = :8083' | awk '{print $4}' | grep -qx '127.0.0.1:8083'"; then
         printf '%s\n' "TradePi deployment verified release=$release_id"
         exit 0
     fi

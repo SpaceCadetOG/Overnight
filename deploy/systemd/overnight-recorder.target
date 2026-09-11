@@ -1,6 +1,6 @@
 [Unit]
 Description=Overnight Strategy - recorder services
-Wants=lightercollector.service overnight-health.timer overnight-disk-guard.timer
+Wants=lightercollector.service oracleapi.service overnight-health.timer overnight-disk-guard.timer
 After=local-fs.target
 
 [Install]

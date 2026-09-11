@@ -99,6 +99,7 @@ jobs:
             packagevalidator \
             lighterexecutor \
             traderuntime \
+            oracleapi \
             dailylevels \
             dailyreport \
             researchreport \
