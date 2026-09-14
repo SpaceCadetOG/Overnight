@@ -33,3 +33,29 @@ book, ticker, or liquidation stream for the same interval.
 
 These schemas contain no account identifiers, private keys, signatures,
 positions, orders, or execution controls. The Oracle is read-only.
+
+## Historical tape and market-data queries
+
+The read-only API exposes normalized individual events without requiring a
+client to download and decompress an entire archive:
+
+```text
+GET /v1/trades?asset=BTC&from=<RFC3339>&to=<RFC3339>&limit=1000
+GET /v1/events?asset=BTC&stream=trade,book_snapshot,book_delta,ticker&from=<RFC3339>&to=<RFC3339>&limit=1000
+```
+
+Responses contain the versioned Oracle envelopes, package IDs, quality states,
+excluded-event count, and an opaque `next_cursor`. Pass that cursor unchanged
+on the next request. Time ranges are half-open `[from,to)`, limited to 24 hours,
+and response pages contain at most 5,000 events.
+
+Quarantined packages are always rejected. Legacy packages require the explicit
+`allow_uncertified=true` research opt-in and return
+`CHECKSUM_VERIFIED_UNCERTIFIED`. Certified-window filtering uses Oracle receipt
+time, while the requested tape interval uses exchange time when the venue
+provided it.
+
+Every compressed source file is checked against its sealed manifest before its
+events are returned. The service caches a successful checksum only while file
+size and modification time remain unchanged. Only one historical scan runs at
+a time on TradePi; additional requests receive HTTP 429 with `Retry-After: 5`.

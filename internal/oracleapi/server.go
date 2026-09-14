@@ -1,14 +1,18 @@
 package oracleapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,10 +54,19 @@ type Manifest struct {
 }
 
 type Server struct {
-	root      string
-	version   string
-	commit    string
-	startedAt time.Time
+	root       string
+	version    string
+	commit     string
+	startedAt  time.Time
+	querySlot  chan struct{}
+	checksumMu sync.Mutex
+	checksums  map[string]cachedChecksum
+}
+
+type cachedChecksum struct {
+	Size    int64
+	ModTime time.Time
+	Digest  string
 }
 
 func New(root, version, commit string) (*Server, error) {
@@ -64,7 +77,7 @@ func New(root, version, commit string) (*Server, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("archive root unavailable: %w", err)
 	}
-	return &Server{root: root, version: version, commit: commit, startedAt: time.Now().UTC()}, nil
+	return &Server{root: root, version: version, commit: commit, startedAt: time.Now().UTC(), querySlot: make(chan struct{}, 1), checksums: map[string]cachedChecksum{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -76,7 +89,42 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/coverage", s.coverage)
 	mux.HandleFunc("GET /v1/quality/windows", s.quality)
 	mux.HandleFunc("GET /v1/downloads/{package}/{path...}", s.download)
+	mux.HandleFunc("GET /v1/trades", s.trades)
+	mux.HandleFunc("GET /v1/events", s.events)
 	return securityHeaders(mux)
+}
+
+func (s *Server) verifyFile(path, expected string) error {
+	if expected == "" {
+		return errors.New("manifest checksum is missing")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	s.checksumMu.Lock()
+	if cached, ok := s.checksums[path]; ok && cached.Size == info.Size() && cached.ModTime.Equal(info.ModTime()) && strings.EqualFold(cached.Digest, expected) {
+		s.checksumMu.Unlock()
+		return nil
+	}
+	s.checksumMu.Unlock()
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if !strings.EqualFold(digest, expected) {
+		return fmt.Errorf("archive checksum mismatch")
+	}
+	s.checksumMu.Lock()
+	s.checksums[path] = cachedChecksum{Size: info.Size(), ModTime: info.ModTime(), Digest: digest}
+	s.checksumMu.Unlock()
+	return nil
 }
 
 func securityHeaders(next http.Handler) http.Handler {
