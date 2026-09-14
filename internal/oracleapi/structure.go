@@ -40,12 +40,11 @@ func (s *Server) serveStructure(w http.ResponseWriter, r *http.Request, includeZ
 		writeError(w, 400, err)
 		return
 	}
-	trades, source, status, err := s.analyticTrades(r, in)
+	profile, source, status, err := s.streamingProfile(r, in, 0.70)
 	if err != nil {
 		writeError(w, status, err)
 		return
 	}
-	profile := buildProfile(trades, 0.70)
 	levels := levelsFromProfile(in, profile)
 	response := map[string]any{"schema_version": "oracle-market-structure-v1", "asset": in.Asset, "from": in.From, "to": in.To, "period": in.Period, "session_definition_version": sessionDefinitionVersion, "zone_model": zoneModelVersion, "levels": levels, "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To}
 	if includeZones {

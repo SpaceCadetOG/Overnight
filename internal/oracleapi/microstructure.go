@@ -57,6 +57,10 @@ func (s *Server) liquidity(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
+	if in.To.Sub(in.From) > maxQueryRange {
+		writeError(w, 400, errors.New("liquidity queries are limited to 24h; request adjacent pages"))
+		return
+	}
 	observations, packages, quality, err := s.loadLiquidity(r, in)
 	if err != nil {
 		writeError(w, statusForArchiveError(err), err)
@@ -84,6 +88,10 @@ func (s *Server) heatmap(w http.ResponseWriter, r *http.Request) {
 	in, err := parseAnalyticsInput(r)
 	if err != nil {
 		writeError(w, 400, err)
+		return
+	}
+	if in.To.Sub(in.From) > maxQueryRange {
+		writeError(w, 400, errors.New("heatmap queries are limited to 24h; request adjacent pages"))
 		return
 	}
 	observations, packages, quality, err := s.loadLiquidity(r, in)
@@ -131,6 +139,10 @@ func (s *Server) openInterest(w http.ResponseWriter, r *http.Request) {
 	in, err := parseAnalyticsInput(r)
 	if err != nil {
 		writeError(w, 400, err)
+		return
+	}
+	if in.To.Sub(in.From) > maxQueryRange {
+		writeError(w, 400, errors.New("open-interest queries are limited to 24h; request adjacent pages"))
 		return
 	}
 	points, packages, quality, err := s.loadOpenInterest(r, in)

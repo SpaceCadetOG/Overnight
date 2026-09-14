@@ -211,6 +211,25 @@ func TestTradeDerivedAnalytics(t *testing.T) {
 	}
 }
 
+func TestStreamingProfileAccumulatorMatchesExactProfile(t *testing.T) {
+	trades := []analyticTrade{
+		{At: time.Unix(1, 0), Price: 100, Size: 2, Notional: 200, Buy: true},
+		{At: time.Unix(2, 0), Price: 101, Size: 3, Notional: 303, Buy: false},
+		{At: time.Unix(3, 0), Price: 100, Size: 1, Notional: 100, Buy: true},
+	}
+	want := buildProfile(trades, 0.70)
+	acc := newProfileAccumulator()
+	for _, trade := range trades {
+		acc.Add(trade)
+	}
+	got := acc.Profile(0.70)
+	wantJSON, _ := json.Marshal(want)
+	gotJSON, _ := json.Marshal(got)
+	if !bytes.Equal(wantJSON, gotJSON) {
+		t.Fatalf("streaming profile differs\nwant=%s\ngot=%s", wantJSON, gotJSON)
+	}
+}
+
 func TestPersistentMicrostructureAPIs(t *testing.T) {
 	h := fixture(t).Handler()
 	base := "?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z"

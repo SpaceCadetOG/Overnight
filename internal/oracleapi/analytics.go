@@ -1,7 +1,6 @@
 package oracleapi
 
 import (
-	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
@@ -9,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
 )
 
 const analyticsSchema = "oracle-analytics-v1"
+
+const maxProfileRange = 366 * 24 * time.Hour
 
 type analyticTrade struct {
 	At       time.Time
@@ -86,8 +85,8 @@ func parseAnalyticsInput(r *http.Request) (analyticsInput, error) {
 		if err != nil {
 			return analyticsInput{}, err
 		}
-		if instance.UTCEnd.Sub(instance.UTCStart) > maxQueryRange {
-			return analyticsInput{}, errors.New("rolling profiles over 24h are not available in this release")
+		if instance.UTCEnd.Sub(instance.UTCStart) > maxProfileRange {
+			return analyticsInput{}, errors.New("profile range cannot exceed 366 days")
 		}
 		return analyticsInput{Asset: asset, From: instance.UTCStart, To: minTime(instance.UTCEnd, at.UTC()), Allow: r.URL.Query().Get("allow_uncertified") == "true", Period: period, Session: &instance}, nil
 	}
@@ -99,41 +98,26 @@ func parseAnalyticsInput(r *http.Request) (analyticsInput, error) {
 	if err != nil {
 		return analyticsInput{}, errors.New("to must be RFC3339")
 	}
-	if !to.After(from) || to.Sub(from) > maxQueryRange {
-		return analyticsInput{}, errors.New("time range must be positive and no greater than 24h")
+	if !to.After(from) || to.Sub(from) > maxProfileRange {
+		return analyticsInput{}, errors.New("time range must be positive and no greater than 366 days")
 	}
 	return analyticsInput{Asset: asset, From: from.UTC(), To: to.UTC(), Allow: r.URL.Query().Get("allow_uncertified") == "true", Period: "ANCHORED"}, nil
 }
 
 func (s *Server) analyticTrades(r *http.Request, in analyticsInput) ([]analyticTrade, queryResponse, int, error) {
-	query := eventQuery{Asset: in.Asset, Streams: map[model.Stream]bool{model.StreamTrade: true}, From: in.From, To: in.To, Limit: int(^uint(0) >> 1), AllowUncertified: in.Allow}
-	result, status, err := s.runQuery(r, query)
-	if err != nil {
-		return nil, result, status, err
-	}
-	trades := make([]analyticTrade, 0, len(result.Events))
-	for _, event := range result.Events {
-		if event.Stream != model.StreamTrade {
-			continue
-		}
-		var value model.Trade
-		if json.Unmarshal(event.Payload, &value) != nil {
-			continue
-		}
-		price, priceErr := strconv.ParseFloat(value.Price, 64)
-		size, sizeErr := strconv.ParseFloat(value.Size, 64)
-		if priceErr != nil || sizeErr != nil || price <= 0 || size <= 0 {
-			continue
-		}
-		trades = append(trades, analyticTrade{At: eventTime(event), Price: price, Size: size, Notional: price * size, Buy: strings.EqualFold(value.AggressorSide, "BUY")})
-	}
-	return trades, result, 200, nil
+	trades := []analyticTrade{}
+	result, status, err := s.walkAnalyticTrades(r, in, func(trade analyticTrade) { trades = append(trades, trade) })
+	return trades, result, status, err
 }
 
 func (s *Server) candles(w http.ResponseWriter, r *http.Request) {
 	in, err := parseAnalyticsInput(r)
 	if err != nil {
 		writeError(w, 400, err)
+		return
+	}
+	if in.To.Sub(in.From) > maxQueryRange {
+		writeError(w, 400, errors.New("candle queries are limited to 24h; request adjacent pages"))
 		return
 	}
 	interval, err := parseInterval(r.URL.Query().Get("interval"))
@@ -163,12 +147,11 @@ func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	trades, source, status, err := s.analyticTrades(r, in)
+	profile, source, status, err := s.streamingProfile(r, in, valueArea)
 	if err != nil {
 		writeError(w, status, err)
 		return
 	}
-	profile := buildProfile(trades, valueArea)
 	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "VOLUME_PROFILE", "profile_model": "trade-volume-at-price-v1", "session_definition_version": sessionDefinitionVersion, "period": in.Period, "session": in.Session, "asset": in.Asset, "from": in.From, "to": in.To, "value_area_fraction": valueArea, "profile": profile, "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
 }
 
@@ -176,6 +159,10 @@ func (s *Server) footprints(w http.ResponseWriter, r *http.Request) {
 	in, err := parseAnalyticsInput(r)
 	if err != nil {
 		writeError(w, 400, err)
+		return
+	}
+	if in.To.Sub(in.From) > maxQueryRange {
+		writeError(w, 400, errors.New("footprint queries are limited to 24h; request adjacent pages"))
 		return
 	}
 	interval, err := parseInterval(r.URL.Query().Get("interval"))
@@ -197,23 +184,100 @@ func (s *Server) orderFlow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
-	trades, source, status, err := s.analyticTrades(r, in)
+	accumulator := newProfileAccumulator()
+	source, status, err := s.walkAnalyticTrades(r, in, accumulator.Add)
 	if err != nil {
 		writeError(w, status, err)
 		return
 	}
-	var buy, sell, notional, cvd float64
-	for _, trade := range trades {
-		notional += trade.Notional
-		if trade.Buy {
-			buy += trade.Size
+	buy, sell, notional, count := accumulator.buy, accumulator.sell, accumulator.weighted, accumulator.trades
+	cvd := buy - sell
+	duration := in.To.Sub(in.From).Seconds()
+	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "ORDER_FLOW", "asset": in.Asset, "from": in.From, "to": in.To, "trades": count, "buy_volume": decimal(buy), "sell_volume": decimal(sell), "total_volume": decimal(buy + sell), "delta": decimal(cvd), "cvd": decimal(cvd), "delta_rate_per_second": decimal(cvd / duration), "notional": decimal(notional), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+}
+
+type profileAccumulator struct {
+	byPrice             map[float64]*volumeBin
+	buy, sell, weighted float64
+	trades              int
+	open, close         float64
+}
+
+func newProfileAccumulator() *profileAccumulator {
+	return &profileAccumulator{byPrice: map[float64]*volumeBin{}}
+}
+func (a *profileAccumulator) Add(trade analyticTrade) {
+	if a.trades == 0 {
+		a.open = trade.Price
+	}
+	a.close = trade.Price
+	a.trades++
+	a.weighted += trade.Notional
+	if a.byPrice[trade.Price] == nil {
+		a.byPrice[trade.Price] = &volumeBin{price: trade.Price}
+	}
+	if trade.Buy {
+		a.byPrice[trade.Price].buy += trade.Size
+		a.buy += trade.Size
+	} else {
+		a.byPrice[trade.Price].sell += trade.Size
+		a.sell += trade.Size
+	}
+}
+
+func (a *profileAccumulator) Profile(fraction float64) map[string]any {
+	prices := make([]float64, 0, len(a.byPrice))
+	total := a.buy + a.sell
+	for price := range a.byPrice {
+		prices = append(prices, price)
+	}
+	sort.Float64s(prices)
+	distribution := make([]priceVolume, 0, len(prices))
+	pocIndex, pocVolume := 0, -1.0
+	for i, price := range prices {
+		b := a.byPrice[price]
+		volume := b.buy + b.sell
+		if volume > pocVolume {
+			pocIndex, pocVolume = i, volume
+		}
+		distribution = append(distribution, priceVolume{Price: decimal(price), BuyVolume: decimal(b.buy), SellVolume: decimal(b.sell), Volume: decimal(volume), Delta: decimal(b.buy - b.sell)})
+	}
+	low, high, accumulated := pocIndex, pocIndex, math.Max(pocVolume, 0)
+	for accumulated < total*fraction && (low > 0 || high+1 < len(prices)) {
+		below, above := -1.0, -1.0
+		if low > 0 {
+			b := a.byPrice[prices[low-1]]
+			below = b.buy + b.sell
+		}
+		if high+1 < len(prices) {
+			b := a.byPrice[prices[high+1]]
+			above = b.buy + b.sell
+		}
+		if above >= below {
+			high++
+			accumulated += above
 		} else {
-			sell += trade.Size
+			low--
+			accumulated += below
 		}
 	}
-	cvd = buy - sell
-	duration := in.To.Sub(in.From).Seconds()
-	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "ORDER_FLOW", "asset": in.Asset, "from": in.From, "to": in.To, "trades": len(trades), "buy_volume": decimal(buy), "sell_volume": decimal(sell), "total_volume": decimal(buy + sell), "delta": decimal(cvd), "cvd": decimal(cvd), "delta_rate_per_second": decimal(cvd / duration), "notional": decimal(notional), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+	value := map[string]any{"trades": a.trades, "price_levels": len(prices), "total_volume": decimal(total), "buy_volume": decimal(a.buy), "sell_volume": decimal(a.sell), "delta": decimal(a.buy - a.sell), "distribution": distribution}
+	if len(prices) > 0 {
+		value["poc"], value["val"], value["vah"] = decimal(prices[pocIndex]), decimal(prices[low]), decimal(prices[high])
+		value["low"], value["high"] = decimal(prices[0]), decimal(prices[len(prices)-1])
+		value["open"], value["close"] = decimal(a.open), decimal(a.close)
+		value["hvns"], value["lvns"] = profileNodes(prices, a.byPrice, pocIndex)
+	}
+	if total > 0 {
+		value["vwap"] = decimal(a.weighted / total)
+	}
+	return value
+}
+
+func (s *Server) streamingProfile(r *http.Request, in analyticsInput, fraction float64) (map[string]any, queryResponse, int, error) {
+	acc := newProfileAccumulator()
+	source, status, err := s.walkAnalyticTrades(r, in, acc.Add)
+	return acc.Profile(fraction), source, status, err
 }
 
 func parseInterval(raw string) (time.Duration, error) {
@@ -298,65 +362,11 @@ func buildFootprints(trades []analyticTrade, interval time.Duration) []footprint
 }
 
 func buildProfile(trades []analyticTrade, fraction float64) map[string]any {
-	byPrice := map[float64]*volumeBin{}
-	var total, buy, sell, weighted float64
+	acc := newProfileAccumulator()
 	for _, trade := range trades {
-		if byPrice[trade.Price] == nil {
-			byPrice[trade.Price] = &volumeBin{price: trade.Price}
-		}
-		if trade.Buy {
-			byPrice[trade.Price].buy += trade.Size
-			buy += trade.Size
-		} else {
-			byPrice[trade.Price].sell += trade.Size
-			sell += trade.Size
-		}
-		total += trade.Size
-		weighted += trade.Price * trade.Size
+		acc.Add(trade)
 	}
-	prices := make([]float64, 0, len(byPrice))
-	for price := range byPrice {
-		prices = append(prices, price)
-	}
-	sort.Float64s(prices)
-	distribution := make([]priceVolume, 0, len(prices))
-	pocIndex, pocVolume := 0, -1.0
-	for i, price := range prices {
-		b := byPrice[price]
-		volume := b.buy + b.sell
-		if volume > pocVolume {
-			pocIndex, pocVolume = i, volume
-		}
-		distribution = append(distribution, priceVolume{Price: decimal(price), BuyVolume: decimal(b.buy), SellVolume: decimal(b.sell), Volume: decimal(volume), Delta: decimal(b.buy - b.sell)})
-	}
-	low, high, accumulated := pocIndex, pocIndex, math.Max(pocVolume, 0)
-	for accumulated < total*fraction && (low > 0 || high+1 < len(prices)) {
-		below, above := -1.0, -1.0
-		if low > 0 {
-			below = byPrice[prices[low-1]].buy + byPrice[prices[low-1]].sell
-		}
-		if high+1 < len(prices) {
-			above = byPrice[prices[high+1]].buy + byPrice[prices[high+1]].sell
-		}
-		if above >= below {
-			high++
-			accumulated += above
-		} else {
-			low--
-			accumulated += below
-		}
-	}
-	value := map[string]any{"trades": len(trades), "price_levels": len(prices), "total_volume": decimal(total), "buy_volume": decimal(buy), "sell_volume": decimal(sell), "delta": decimal(buy - sell), "distribution": distribution}
-	if len(prices) > 0 {
-		value["poc"], value["val"], value["vah"] = decimal(prices[pocIndex]), decimal(prices[low]), decimal(prices[high])
-		value["low"], value["high"] = decimal(prices[0]), decimal(prices[len(prices)-1])
-		value["open"], value["close"] = decimal(trades[0].Price), decimal(trades[len(trades)-1].Price)
-		value["hvns"], value["lvns"] = profileNodes(prices, byPrice, pocIndex)
-	}
-	if total > 0 {
-		value["vwap"] = decimal(weighted / total)
-	}
-	return value
+	return acc.Profile(fraction)
 }
 
 func profileNodes(prices []float64, values map[float64]*volumeBin, poc int) ([]string, []string) {
