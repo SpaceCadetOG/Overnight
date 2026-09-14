@@ -34,6 +34,16 @@ func fixture(t *testing.T) *Server {
 	if err := os.WriteFile(tradePath, trades, 0o640); err != nil {
 		t.Fatal(err)
 	}
+	liquidity := zstdBody(t, `{"schema_version":"oracle-liquidity-observation-v1","asset":"BTC","window_start":"2026-09-08T12:00:59Z","window_end":"2026-09-08T12:01:02Z","connection_id":"conn-1","book_quality":"CERTIFIED","observation_type":"DISPLAYED_BOOK_CHANGE","changes":[[1788868860000,"ASK","60001.10","1.00120","1.00000","-0.00120","REMOVED",11,12],[1788868860500,"ASK","60001.10","1.00000","1.00120","0.00120","ADDED",12,13],[1788868861000,"BID","59990.00","2.00230","2.00000","-0.00230","REMOVED",13,14]]}`+"\n")
+	liquidityPath := filepath.Join(dir, "asset=BTC", "liquidity_observations.jsonl.zst")
+	if err := os.WriteFile(liquidityPath, liquidity, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	marketStats := zstdBody(t, `{"received_at":"2026-09-08T12:01:00Z","event":{"timestamp":1788868860000,"market_stats":{"1":{"symbol":"BTC","open_interest":"123.45","mark_price":"60001.50"}}}}`+"\n")
+	marketStatsPath := filepath.Join(dir, "market_stats.jsonl.zst")
+	if err := os.WriteFile(marketStatsPath, marketStats, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	certificate := []byte(`{"classification":"CERTIFIED","assets":[{"symbol":"BTC","windows":[{"started_at":"2026-09-08T12:00:00Z","ended_at":"2026-09-08T13:00:00Z","certified":true}]}]}`)
 	if err := os.WriteFile(filepath.Join(dir, "RECORDER_CERTIFICATE.json"), certificate, 0o640); err != nil {
 		t.Fatal(err)
@@ -41,6 +51,8 @@ func fixture(t *testing.T) *Server {
 	manifest := Manifest{SchemaVersion: 4, PackageID: "lighter-2026-09-08", Date: "2026-09-08", Assets: []string{"BTC"}, CertificationClass: "CERTIFIED", Files: []File{
 		{Path: "asset=BTC/orderbook_events.jsonl.zst", Compressed: int64(len(event)), Records: 1, SHA256: digest(event)},
 		{Path: "asset=BTC/trade_flow.jsonl.zst", Compressed: int64(len(trades)), Records: 1, SHA256: digest(trades)},
+		{Path: "asset=BTC/liquidity_observations.jsonl.zst", Compressed: int64(len(liquidity)), Records: 1, SHA256: digest(liquidity)},
+		{Path: "market_stats.jsonl.zst", Compressed: int64(len(marketStats)), Records: 1, SHA256: digest(marketStats)},
 	}}
 	body, _ := json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(dir, "MANIFEST.json"), body, 0o640); err != nil {
@@ -173,6 +185,31 @@ func TestTradeDerivedAnalytics(t *testing.T) {
 		{"/v1/order-flow" + base, []string{`"type":"ORDER_FLOW"`, `"trades":2`, `"delta":"-0.0011"`, `"packages":["lighter-2026-09-08"]`}},
 		{"/v1/levels" + base, []string{`"schema_version":"oracle-market-structure-v1"`, `"type":"POC"`, `"type":"VWAP"`, `"session_definition_version":"global-sessions-v1"`}},
 		{"/v1/zones" + base + "&tolerance_bps=10", []string{`"zone_model":"profile-cluster-v1"`, `"zones"`, `"sources"`, `"strength"`}},
+	}
+	for _, test := range tests {
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if r.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", test.path, r.Code, r.Body.String())
+		}
+		for _, want := range test.want {
+			if !strings.Contains(r.Body.String(), want) {
+				t.Errorf("%s missing %s body=%s", test.path, want, r.Body.String())
+			}
+		}
+	}
+}
+
+func TestPersistentMicrostructureAPIs(t *testing.T) {
+	h := fixture(t).Handler()
+	base := "?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z"
+	tests := []struct {
+		path string
+		want []string
+	}{
+		{"/v1/liquidity" + base, []string{`"model":"displayed-liquidity-correlation-v1"`, `"correlation":"LIKELY_EXECUTED"`, `"correlation":"LIKELY_CANCELLED"`, `"disclaimer"`}},
+		{"/v1/heatmap" + base, []string{`"schema_version":"oracle-heatmap-v1"`, `"price":"60001.10"`, `"added":"0.0012"`}},
+		{"/v1/open-interest" + base, []string{`"schema_version":"oracle-open-interest-v1"`, `"open_interest":"123.45"`, `"mark_price":"60001.50"`}},
 	}
 	for _, test := range tests {
 		r := httptest.NewRecorder()
