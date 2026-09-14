@@ -51,17 +51,45 @@ type footprint struct {
 	Levels []priceVolume `json:"levels"`
 }
 
+type volumeBin struct{ price, buy, sell float64 }
+type volumeNode struct{ price, volume float64 }
+
 type analyticsInput struct {
-	Asset string
-	From  time.Time
-	To    time.Time
-	Allow bool
+	Asset   string
+	From    time.Time
+	To      time.Time
+	Allow   bool
+	Period  string
+	Session *sessionInstance
 }
 
 func parseAnalyticsInput(r *http.Request) (analyticsInput, error) {
 	asset := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("asset")))
 	if asset == "" || strings.ContainsAny(asset, `/\\`) {
 		return analyticsInput{}, errors.New("asset is required")
+	}
+	period := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("period")))
+	if period != "" && r.URL.Query().Get("from") == "" && r.URL.Query().Get("to") == "" {
+		at := time.Now().UTC()
+		var err error
+		if raw := r.URL.Query().Get("at"); raw != "" {
+			at, err = time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				return analyticsInput{}, errors.New("at must be RFC3339")
+			}
+		}
+		definition, ok := findSessionDefinition(period)
+		if !ok {
+			return analyticsInput{}, errors.New("unknown profile period")
+		}
+		instance, err := resolveSession(definition, at.UTC())
+		if err != nil {
+			return analyticsInput{}, err
+		}
+		if instance.UTCEnd.Sub(instance.UTCStart) > maxQueryRange {
+			return analyticsInput{}, errors.New("rolling profiles over 24h are not available in this release")
+		}
+		return analyticsInput{Asset: asset, From: instance.UTCStart, To: minTime(instance.UTCEnd, at.UTC()), Allow: r.URL.Query().Get("allow_uncertified") == "true", Period: period, Session: &instance}, nil
 	}
 	from, err := time.Parse(time.RFC3339Nano, r.URL.Query().Get("from"))
 	if err != nil {
@@ -74,7 +102,7 @@ func parseAnalyticsInput(r *http.Request) (analyticsInput, error) {
 	if !to.After(from) || to.Sub(from) > maxQueryRange {
 		return analyticsInput{}, errors.New("time range must be positive and no greater than 24h")
 	}
-	return analyticsInput{Asset: asset, From: from.UTC(), To: to.UTC(), Allow: r.URL.Query().Get("allow_uncertified") == "true"}, nil
+	return analyticsInput{Asset: asset, From: from.UTC(), To: to.UTC(), Allow: r.URL.Query().Get("allow_uncertified") == "true", Period: "ANCHORED"}, nil
 }
 
 func (s *Server) analyticTrades(r *http.Request, in analyticsInput) ([]analyticTrade, queryResponse, int, error) {
@@ -141,7 +169,7 @@ func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := buildProfile(trades, valueArea)
-	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "VOLUME_PROFILE", "profile_model": "trade-volume-at-price-v1", "asset": in.Asset, "from": in.From, "to": in.To, "value_area_fraction": valueArea, "profile": profile, "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "VOLUME_PROFILE", "profile_model": "trade-volume-at-price-v1", "session_definition_version": sessionDefinitionVersion, "period": in.Period, "session": in.Session, "asset": in.Asset, "from": in.From, "to": in.To, "value_area_fraction": valueArea, "profile": profile, "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
 }
 
 func (s *Server) footprints(w http.ResponseWriter, r *http.Request) {
@@ -270,12 +298,11 @@ func buildFootprints(trades []analyticTrade, interval time.Duration) []footprint
 }
 
 func buildProfile(trades []analyticTrade, fraction float64) map[string]any {
-	type bin struct{ price, buy, sell float64 }
-	byPrice := map[float64]*bin{}
+	byPrice := map[float64]*volumeBin{}
 	var total, buy, sell, weighted float64
 	for _, trade := range trades {
 		if byPrice[trade.Price] == nil {
-			byPrice[trade.Price] = &bin{price: trade.Price}
+			byPrice[trade.Price] = &volumeBin{price: trade.Price}
 		}
 		if trade.Buy {
 			byPrice[trade.Price].buy += trade.Size
@@ -323,6 +350,8 @@ func buildProfile(trades []analyticTrade, fraction float64) map[string]any {
 	if len(prices) > 0 {
 		value["poc"], value["val"], value["vah"] = decimal(prices[pocIndex]), decimal(prices[low]), decimal(prices[high])
 		value["low"], value["high"] = decimal(prices[0]), decimal(prices[len(prices)-1])
+		value["open"], value["close"] = decimal(trades[0].Price), decimal(trades[len(trades)-1].Price)
+		value["hvns"], value["lvns"] = profileNodes(prices, byPrice, pocIndex)
 	}
 	if total > 0 {
 		value["vwap"] = decimal(weighted / total)
@@ -330,9 +359,55 @@ func buildProfile(trades []analyticTrade, fraction float64) map[string]any {
 	return value
 }
 
+func profileNodes(prices []float64, values map[float64]*volumeBin, poc int) ([]string, []string) {
+	highs, lows := []volumeNode{}, []volumeNode{}
+	for i := 1; i+1 < len(prices); i++ {
+		volume := values[prices[i]].buy + values[prices[i]].sell
+		below := values[prices[i-1]].buy + values[prices[i-1]].sell
+		above := values[prices[i+1]].buy + values[prices[i+1]].sell
+		if i != poc && volume >= below && volume >= above {
+			highs = append(highs, volumeNode{prices[i], volume})
+		}
+		if volume <= below && volume <= above {
+			lows = append(lows, volumeNode{prices[i], volume})
+		}
+	}
+	sort.Slice(highs, func(i, j int) bool {
+		if highs[i].volume == highs[j].volume {
+			return highs[i].price < highs[j].price
+		}
+		return highs[i].volume > highs[j].volume
+	})
+	sort.Slice(lows, func(i, j int) bool {
+		if lows[i].volume == lows[j].volume {
+			return lows[i].price < lows[j].price
+		}
+		return lows[i].volume < lows[j].volume
+	})
+	return nodePrices(highs, 2), nodePrices(lows, 2)
+}
+
+func nodePrices(nodes []volumeNode, limit int) []string {
+	if len(nodes) < limit {
+		limit = len(nodes)
+	}
+	out := make([]string, 0, limit)
+	for _, node := range nodes[:limit] {
+		out = append(out, decimal(node.price))
+	}
+	return out
+}
+
 func decimal(value float64) string {
 	if math.Abs(value) < 1e-15 {
 		value = 0
 	}
 	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func minTime(left, right time.Time) time.Time {
+	if left.Before(right) {
+		return left
+	}
+	return right
 }

@@ -183,3 +183,32 @@ func TestTradeDerivedAnalytics(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalSessionsAreVersionedAndDSTSafe(t *testing.T) {
+	h := fixture(t).Handler()
+	for _, path := range []string{
+		"/v1/session-definitions",
+		"/v1/sessions?type=US&at=2026-03-09T14:00:00Z",
+		"/v1/sessions?type=LONDON&at=2026-03-30T12:00:00Z",
+		"/v1/sessions?type=24H&at=2026-09-14T19:00:00Z",
+	} {
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, path, nil))
+		if r.Code != http.StatusOK || !strings.Contains(r.Body.String(), sessionDefinitionVersion) {
+			t.Fatalf("%s status=%d body=%s", path, r.Code, r.Body.String())
+		}
+	}
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/v1/sessions?type=US&at=2026-03-09T14:00:00Z", nil))
+	if !strings.Contains(r.Body.String(), `"utc_start":"2026-03-09T13:30:00Z"`) || !strings.Contains(r.Body.String(), `"utc_offset_seconds":-14400`) {
+		t.Fatalf("New York DST boundary is wrong: %s", r.Body.String())
+	}
+}
+
+func TestHistoricalPointInTimeBook(t *testing.T) {
+	r := httptest.NewRecorder()
+	fixture(t).Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/v1/books/BTC/at?at=2026-09-08T12:05:00Z", nil))
+	if r.Code != http.StatusOK || !strings.Contains(r.Body.String(), `"schema_version":"oracle-book-at-v1"`) || !strings.Contains(r.Body.String(), `"price":"59999.10"`) || !strings.Contains(r.Body.String(), `"quality":["CERTIFIED"]`) {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
