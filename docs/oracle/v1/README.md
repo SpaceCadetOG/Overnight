@@ -73,8 +73,11 @@ GET /v1/books/{asset}
 WS  /v1/live?assets=BTC,ETH&streams=trade,book_delta&since=<RFC3339>
 ```
 
-The WebSocket sends bounded in-memory backfill, current full-depth snapshots, a
-`synchronized` marker, and then live increments. `backfill_start.truncated`
+The WebSocket sends bounded in-memory backfill, current Oracle book views, a
+`synchronized` marker, and then live events. Set `depth=25` (maximum 200) for
+the DOM view. Every accepted book event is followed by an authoritative
+`book_state`; clients render it directly and do not reconstruct L2 locally.
+`backfill_start.truncated`
 states whether the requested timestamp predates the in-memory buffer. Clients
 must use `/v1/events` for older history and deduplicate with `event_id`.
 

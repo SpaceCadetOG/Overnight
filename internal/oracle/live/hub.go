@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,21 @@ type Hub struct {
 	dropped     uint64
 	recent      []model.Envelope
 	recentLimit int
+}
+
+// BookView is an Oracle-authoritative, bounded DOM projection. Clients render
+// it directly and must not reconstruct a book from public venue deltas.
+type BookView struct {
+	SchemaVersion  string        `json:"schema_version"`
+	Asset          string        `json:"asset"`
+	At             time.Time     `json:"timestamp"`
+	ConnectionID   string        `json:"connection_id"`
+	VenueNonce     int64         `json:"venue_nonce"`
+	OracleSequence uint64        `json:"oracle_sequence"`
+	Depth          int           `json:"depth"`
+	Bids           []model.Level `json:"bids"`
+	Asks           []model.Level `json:"asks"`
+	Quality        model.Quality `json:"quality"`
 }
 
 func New() *Hub {
@@ -160,6 +176,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	depth := parseDepth(r.URL.Query().Get("depth"))
 	subscriber := &subscription{assets: parseAssets(r.URL.Query().Get("assets")), streams: parseStreams(r.URL.Query().Get("streams")), queue: make(chan model.Envelope, 4096)}
 	h.mu.Lock()
 	h.subscribers[subscriber] = struct{}{}
@@ -205,7 +222,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, snapshot := range initial {
-		if err := conn.WriteJSON(map[string]any{"type": "book_snapshot", "snapshot": snapshot}); err != nil {
+		if err := conn.WriteJSON(map[string]any{"type": "book_snapshot", "snapshot": bookView(snapshot, depth)}); err != nil {
 			return
 		}
 	}
@@ -224,6 +241,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			if err := conn.WriteJSON(map[string]any{"type": "event", "event": event}); err != nil {
 				return
 			}
+			if event.Stream == model.StreamBookSnapshot || event.Stream == model.StreamBookDelta {
+				if snapshot, exists := h.Book(event.Asset); exists {
+					if err := conn.WriteJSON(map[string]any{"type": "book_state", "snapshot": bookView(snapshot, depth)}); err != nil {
+						return
+					}
+				}
+			}
 		case at := <-heartbeat.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteJSON(map[string]any{"type": "heartbeat", "at": at.UTC(), "books": h.ReadyBooks()}); err != nil {
@@ -231,6 +255,28 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func parseDepth(raw string) int {
+	depth, err := strconv.Atoi(raw)
+	if err != nil || depth <= 0 {
+		return 25
+	}
+	if depth > 200 {
+		return 200
+	}
+	return depth
+}
+
+func bookView(snapshot book.Snapshot, depth int) BookView {
+	bids, asks := snapshot.Bids, snapshot.Asks
+	if len(bids) > depth {
+		bids = bids[:depth]
+	}
+	if len(asks) > depth {
+		asks = asks[:depth]
+	}
+	return BookView{SchemaVersion: "oracle-book-view-v1", Asset: snapshot.Asset, At: snapshot.At, ConnectionID: snapshot.ConnectionID, VenueNonce: snapshot.VenueNonce, OracleSequence: snapshot.OracleSequence, Depth: depth, Bids: bids, Asks: asks, Quality: snapshot.Quality}
 }
 
 func parseAssets(value string) map[string]bool {
