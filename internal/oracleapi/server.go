@@ -105,6 +105,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/order-flow", s.orderFlow)
 	mux.HandleFunc("GET /v1/session-definitions", s.sessionDefinitions)
 	mux.HandleFunc("GET /v1/sessions", s.sessions)
+	mux.HandleFunc("GET /v1/levels", s.levels)
+	mux.HandleFunc("GET /v1/zones", s.zones)
 	mux.HandleFunc("GET /v1/books/{asset}", s.live)
 	mux.HandleFunc("GET /v1/books/{asset}/at", s.bookAt)
 	mux.HandleFunc("GET /v1/market/{asset}", s.live)

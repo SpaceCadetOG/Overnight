@@ -171,6 +171,8 @@ func TestTradeDerivedAnalytics(t *testing.T) {
 		{"/v1/profiles" + base + "&value_area=0.70", []string{`"type":"VOLUME_PROFILE"`, `"poc":"60002.2"`, `"vwap":`, `"distribution"`}},
 		{"/v1/footprints" + base + "&interval=1m", []string{`"type":"FOOTPRINT"`, `"levels"`, `"buy_volume":"0.0012"`, `"sell_volume":"0.0023"`}},
 		{"/v1/order-flow" + base, []string{`"type":"ORDER_FLOW"`, `"trades":2`, `"delta":"-0.0011"`, `"packages":["lighter-2026-09-08"]`}},
+		{"/v1/levels" + base, []string{`"schema_version":"oracle-market-structure-v1"`, `"type":"POC"`, `"type":"VWAP"`, `"session_definition_version":"global-sessions-v1"`}},
+		{"/v1/zones" + base + "&tolerance_bps=10", []string{`"zone_model":"profile-cluster-v1"`, `"zones"`, `"sources"`, `"strength"`}},
 	}
 	for _, test := range tests {
 		r := httptest.NewRecorder()
