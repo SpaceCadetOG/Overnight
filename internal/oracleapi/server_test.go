@@ -119,6 +119,17 @@ func TestHealthIdentifiesReadOnlyOracle(t *testing.T) {
 	}
 }
 
+func TestHostedDashboardIsReadOnlyAndLinksOracleAPIs(t *testing.T) {
+	r := httptest.NewRecorder()
+	fixture(t).Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if r.Code != http.StatusOK || !strings.Contains(r.Body.String(), "Market Data Oracle") || !strings.Contains(r.Body.String(), "/v1/profiles") || !strings.Contains(r.Body.String(), "/v1/heatmap") {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	if !strings.Contains(r.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+		t.Fatalf("missing restrictive CSP: %s", r.Header().Get("Content-Security-Policy"))
+	}
+}
+
 func TestHistoricalTapeIsNormalizedFilteredAndPaginated(t *testing.T) {
 	h := fixture(t).Handler()
 	path := "/v1/trades?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z&limit=1"
