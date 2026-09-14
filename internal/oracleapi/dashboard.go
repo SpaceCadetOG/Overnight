@@ -4,6 +4,7 @@ import (
 	"html/template"
 	"net/http"
 	"strings"
+	"time"
 )
 
 var dashboardTemplate = template.Must(template.New("oracle-dashboard").Parse(`<!doctype html>
@@ -22,11 +23,20 @@ var dashboardTemplate = template.Must(template.New("oracle-dashboard").Parse(`<!
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	from, to, at := r.URL.Query().Get("from"), r.URL.Query().Get("to"), r.URL.Query().Get("at")
-	if strings.TrimSpace(from) == "" {
-		from = "2026-09-10T14:00:00Z"
-	}
-	if strings.TrimSpace(to) == "" {
-		to = "2026-09-10T14:05:00Z"
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		end := time.Now().UTC()
+		if manifests, err := s.catalog(); err == nil && len(manifests) > 0 {
+			latest := manifests[len(manifests)-1]
+			if !latest.LastEvent.IsZero() {
+				end = latest.LastEvent.UTC()
+			}
+		}
+		if strings.TrimSpace(to) == "" {
+			to = end.Format(time.RFC3339Nano)
+		}
+		if strings.TrimSpace(from) == "" {
+			from = end.Add(-5 * time.Minute).Format(time.RFC3339Nano)
+		}
 	}
 	if strings.TrimSpace(at) == "" {
 		at = to
