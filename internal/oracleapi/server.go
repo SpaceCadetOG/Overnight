@@ -110,6 +110,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/market/{asset}", s.live)
 	mux.HandleFunc("GET /v1/instruments", s.live)
 	mux.HandleFunc("GET /v1/live", s.live)
+	mux.HandleFunc("GET /v1/replay", s.replay)
 	return securityHeaders(mux)
 }
 

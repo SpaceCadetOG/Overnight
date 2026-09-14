@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -210,5 +212,24 @@ func TestHistoricalPointInTimeBook(t *testing.T) {
 	fixture(t).Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/v1/books/BTC/at?at=2026-09-08T12:05:00Z", nil))
 	if r.Code != http.StatusOK || !strings.Contains(r.Body.String(), `"schema_version":"oracle-book-at-v1"`) || !strings.Contains(r.Body.String(), `"price":"59999.10"`) || !strings.Contains(r.Body.String(), `"quality":["CERTIFIED"]`) {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
+
+func TestDeterministicReplayWebSocket(t *testing.T) {
+	server := httptest.NewServer(fixture(t).Handler())
+	defer server.Close()
+	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/replay?asset=BTC&stream=trade&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z&speed=10000"
+	conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	want := []string{"replay_start", "replay_event", "replay_event", "replay_end"}
+	for _, expected := range want {
+		_, body, err := conn.ReadMessage()
+		if err != nil || !strings.Contains(string(body), `"type":"`+expected+`"`) {
+			t.Fatalf("expected %s body=%s err=%v", expected, body, err)
+		}
 	}
 }
