@@ -157,3 +157,29 @@ func TestHistoricalQueryBounds(t *testing.T) {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 	}
 }
+
+func TestTradeDerivedAnalytics(t *testing.T) {
+	h := fixture(t).Handler()
+	base := "?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z"
+	tests := []struct {
+		path string
+		want []string
+	}{
+		{"/v1/candles" + base + "&interval=1m", []string{`"type":"CANDLES"`, `"open":"60001.1"`, `"close":"60002.2"`, `"trades":2`}},
+		{"/v1/profiles" + base + "&value_area=0.70", []string{`"type":"VOLUME_PROFILE"`, `"poc":"60002.2"`, `"vwap":`, `"distribution"`}},
+		{"/v1/footprints" + base + "&interval=1m", []string{`"type":"FOOTPRINT"`, `"levels"`, `"buy_volume":"0.0012"`, `"sell_volume":"0.0023"`}},
+		{"/v1/order-flow" + base, []string{`"type":"ORDER_FLOW"`, `"trades":2`, `"delta":"-0.0011"`, `"packages":["lighter-2026-09-08"]`}},
+	}
+	for _, test := range tests {
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if r.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", test.path, r.Code, r.Body.String())
+		}
+		for _, want := range test.want {
+			if !strings.Contains(r.Body.String(), want) {
+				t.Errorf("%s missing %s body=%s", test.path, want, r.Body.String())
+			}
+		}
+	}
+}
