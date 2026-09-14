@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,6 +63,7 @@ type Server struct {
 	querySlot  chan struct{}
 	checksumMu sync.Mutex
 	checksums  map[string]cachedChecksum
+	liveProxy  *httputil.ReverseProxy
 }
 
 type cachedChecksum struct {
@@ -77,12 +80,17 @@ func New(root, version, commit string) (*Server, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("archive root unavailable: %w", err)
 	}
-	return &Server{root: root, version: version, commit: commit, startedAt: time.Now().UTC(), querySlot: make(chan struct{}, 1), checksums: map[string]cachedChecksum{}}, nil
+	backend, _ := url.Parse("http://127.0.0.1:8082")
+	proxy := httputil.NewSingleHostReverseProxy(backend)
+	proxy.FlushInterval = -1
+	return &Server{root: root, version: version, commit: commit, startedAt: time.Now().UTC(), querySlot: make(chan struct{}, 1), checksums: map[string]cachedChecksum{}, liveProxy: proxy}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/readiness", s.readiness)
 	mux.HandleFunc("GET /v1/version", s.health)
 	mux.HandleFunc("GET /v1/datasets", s.datasets)
 	mux.HandleFunc("GET /v1/datasets/{package}/manifest", s.manifest)
@@ -91,6 +99,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/downloads/{package}/{path...}", s.download)
 	mux.HandleFunc("GET /v1/trades", s.trades)
 	mux.HandleFunc("GET /v1/events", s.events)
+	mux.HandleFunc("GET /v1/books/{asset}", s.live)
+	mux.HandleFunc("GET /v1/market/{asset}", s.live)
+	mux.HandleFunc("GET /v1/instruments", s.live)
+	mux.HandleFunc("GET /v1/live", s.live)
 	return securityHeaders(mux)
 }
 
@@ -137,7 +149,44 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"service": "Market Data Oracle", "mode": "read-only", "version": s.version, "commit": s.commit, "started_at": s.startedAt})
+	writeJSON(w, http.StatusOK, map[string]any{"service": "Market Data Oracle", "mode": "read-only", "version": s.version, "commit": s.commit, "started_at": s.startedAt, "live_backend": "http://127.0.0.1:8082"})
+}
+
+func (s *Server) live(w http.ResponseWriter, r *http.Request) {
+	if s.liveProxy == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("live Oracle backend unavailable"))
+		return
+	}
+	s.liveProxy.ServeHTTP(w, r)
+}
+
+func (s *Server) readiness(w http.ResponseWriter, _ *http.Request) {
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	response, err := client.Get("http://127.0.0.1:8082/healthz")
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "reason": "collector_unreachable"})
+		return
+	}
+	defer response.Body.Close()
+	var status struct {
+		Connected         bool      `json:"connected"`
+		BooksReady        int       `json:"books_ready"`
+		OracleBooksReady  int       `json:"oracle_books_ready"`
+		OracleParityReady int       `json:"oracle_parity_ready"`
+		OracleLastError   string    `json:"oracle_last_error"`
+		LastEvent         time.Time `json:"last_event"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&status) != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "reason": "collector_unhealthy"})
+		return
+	}
+	age := time.Since(status.LastEvent)
+	ready := status.Connected && status.BooksReady == 12 && status.OracleBooksReady == 12 && status.OracleParityReady == 12 && status.OracleLastError == "" && age >= 0 && age <= 10*time.Second
+	code := http.StatusOK
+	if !ready {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, map[string]any{"ready": ready, "collector_connected": status.Connected, "books_ready": status.BooksReady, "oracle_books_ready": status.OracleBooksReady, "oracle_parity_ready": status.OracleParityReady, "oracle_last_error": status.OracleLastError, "last_event": status.LastEvent, "event_age_ms": age.Milliseconds()})
 }
 
 func (s *Server) datasets(w http.ResponseWriter, r *http.Request) {

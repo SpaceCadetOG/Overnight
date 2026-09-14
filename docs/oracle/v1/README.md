@@ -59,3 +59,42 @@ Every compressed source file is checked against its sealed manifest before its
 events are returned. The service caches a successful checksum only while file
 size and modification time remain unchanged. Only one historical scan runs at
 a time on TradePi; additional requests receive HTTP 429 with `Retry-After: 5`.
+
+## Live book and event feed
+
+The production collector remains the only Lighter public WebSocket consumer.
+It runs the legacy and Oracle L2 engines in parallel, publishes only normalized
+events accepted by the recorder, and records full-depth Oracle checkpoints.
+
+```text
+GET /v1/instruments
+GET /v1/market/{asset}
+GET /v1/books/{asset}
+WS  /v1/live?assets=BTC,ETH&streams=trade,book_delta&since=<RFC3339>
+```
+
+The WebSocket sends bounded in-memory backfill, current full-depth snapshots, a
+`synchronized` marker, and then live increments. `backfill_start.truncated`
+states whether the requested timestamp predates the in-memory buffer. Clients
+must use `/v1/events` for older history and deduplicate with `event_id`.
+
+On a collector reconnect, active live subscribers are closed, every cached book
+is invalidated, and new subscribers receive no book until fresh venue snapshots
+have rebuilt it. This prevents deltas from being applied to stale state.
+
+`GET /v1/readiness` succeeds only when both book engines have all 12 markets,
+the collector is connected, the latest event is fresh, and the most recent
+parity comparison has no error.
+
+Displayed-book changes are persisted in one-second batches as
+`oracle-liquidity-observation-v1`. An increase, decrease, or removal is an
+objective displayed-book observation; it is not labeled as execution,
+cancellation, spoofing, or intent until correlated with the trade tape by a
+versioned derived model.
+
+For hot-storage efficiency each `changes` row is a versioned tuple:
+
+```text
+[time_ms, side, price, previous_size, new_size, size_delta,
+ action, venue_sequence, oracle_sequence]
+```

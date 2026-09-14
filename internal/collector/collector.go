@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/ogtrading/overnight-strategy/internal/marketdata/lighter"
+	"github.com/ogtrading/overnight-strategy/internal/oracle/live"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
 
@@ -33,6 +34,13 @@ type Status struct {
 	ConnectionID          string    `json:"connection_id,omitempty"`
 	ConnectionStartedAt   time.Time `json:"connection_started_at,omitempty"`
 	LastRecoveryAt        time.Time `json:"last_recovery_at,omitempty"`
+	OracleEvents          uint64    `json:"oracle_events"`
+	OracleBooksReady      int       `json:"oracle_books_ready"`
+	OracleParityReady     int       `json:"oracle_parity_ready"`
+	OracleCheckpoints     uint64    `json:"oracle_checkpoints"`
+	OracleParityFailures  uint64    `json:"oracle_parity_failures"`
+	OracleSubscriberDrops uint64    `json:"oracle_subscriber_drops"`
+	OracleLastError       string    `json:"oracle_last_error,omitempty"`
 }
 
 type StatusView struct {
@@ -51,12 +59,19 @@ type StatusView struct {
 	ConnectionID          string    `json:"connection_id,omitempty"`
 	ConnectionStartedAt   time.Time `json:"connection_started_at,omitempty"`
 	LastRecoveryAt        time.Time `json:"last_recovery_at,omitempty"`
+	OracleEvents          uint64    `json:"oracle_events"`
+	OracleBooksReady      int       `json:"oracle_books_ready"`
+	OracleParityReady     int       `json:"oracle_parity_ready"`
+	OracleCheckpoints     uint64    `json:"oracle_checkpoints"`
+	OracleParityFailures  uint64    `json:"oracle_parity_failures"`
+	OracleSubscriberDrops uint64    `json:"oracle_subscriber_drops"`
+	OracleLastError       string    `json:"oracle_last_error,omitempty"`
 }
 
 func (s *Status) Snapshot() StatusView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return StatusView{Connected: s.Connected, LastEvent: s.LastEvent, LastError: s.LastError, Events: s.Events, NonceGaps: s.NonceGaps, Reconnects: s.Reconnects, BooksReady: s.BooksReady, Snapshots: s.Snapshots, CrossedBooks: s.CrossedBooks, InvalidLevels: s.InvalidLevels, ConfirmedLiquidations: s.ConfirmedLiquidations, InferredCascades: s.InferredCascades, ConnectionID: s.ConnectionID, ConnectionStartedAt: s.ConnectionStartedAt, LastRecoveryAt: s.LastRecoveryAt}
+	return StatusView{Connected: s.Connected, LastEvent: s.LastEvent, LastError: s.LastError, Events: s.Events, NonceGaps: s.NonceGaps, Reconnects: s.Reconnects, BooksReady: s.BooksReady, Snapshots: s.Snapshots, CrossedBooks: s.CrossedBooks, InvalidLevels: s.InvalidLevels, ConfirmedLiquidations: s.ConfirmedLiquidations, InferredCascades: s.InferredCascades, ConnectionID: s.ConnectionID, ConnectionStartedAt: s.ConnectionStartedAt, LastRecoveryAt: s.LastRecoveryAt, OracleEvents: s.OracleEvents, OracleBooksReady: s.OracleBooksReady, OracleParityReady: s.OracleParityReady, OracleCheckpoints: s.OracleCheckpoints, OracleParityFailures: s.OracleParityFailures, OracleSubscriberDrops: s.OracleSubscriberDrops, OracleLastError: s.OracleLastError}
 }
 
 type Collector struct {
@@ -72,6 +87,23 @@ type Collector struct {
 	connectionID   string
 	connectionLast time.Time
 	recoveryLogged bool
+	oracle         *oraclePipeline
+	oracleParityOK map[string]bool
+	instrumentMu   sync.RWMutex
+	instruments    map[string]oracleInstrument
+}
+
+type oracleInstrument struct {
+	Asset           string          `json:"asset"`
+	Venue           string          `json:"venue"`
+	VenueSymbol     string          `json:"venue_symbol"`
+	MarketID        int16           `json:"market_id"`
+	Status          string          `json:"status"`
+	MarketType      string          `json:"market_type"`
+	MinimumSize     json.RawMessage `json:"minimum_size"`
+	MinimumNotional json.RawMessage `json:"minimum_notional"`
+	PriceDecimals   int             `json:"price_decimals"`
+	SizeDecimals    int             `json:"size_decimals"`
 }
 
 type orderBook struct {
@@ -92,7 +124,7 @@ func New(baseURL, wsURL string, output interface{ Append(string, any) error }) *
 		}
 		wsURL += separator + "readonly=true"
 	}
-	return &Collector{BaseURL: baseURL, WSURL: wsURL, Store: output, Status: &Status{}, lastNonce: map[string]int64{}, books: map[string]*orderBook{}, marketIDs: map[string]string{}, lastCheckpoint: map[string]time.Time{}, flow: newLiquidationCorrelator()}
+	return &Collector{BaseURL: baseURL, WSURL: wsURL, Store: output, Status: &Status{}, lastNonce: map[string]int64{}, books: map[string]*orderBook{}, marketIDs: map[string]string{}, lastCheckpoint: map[string]time.Time{}, flow: newLiquidationCorrelator(), oracle: newOraclePipeline(output), oracleParityOK: map[string]bool{}, instruments: map[string]oracleInstrument{}}
 }
 
 func (c *Collector) Run(ctx context.Context) error {
@@ -191,10 +223,15 @@ func (c *Collector) runOnce(ctx context.Context) error {
 	c.Status.Connected = true
 	c.Status.LastError = ""
 	c.Status.BooksReady = 0
+	c.Status.OracleBooksReady = 0
+	c.Status.OracleParityReady = 0
+	c.Status.OracleLastError = ""
 	c.Status.mu.Unlock()
 	c.books = map[string]*orderBook{}
 	c.lastNonce = map[string]int64{}
 	c.lastCheckpoint = map[string]time.Time{}
+	c.oracle.resetBooks()
+	c.oracleParityOK = map[string]bool{}
 	connectionStarted := time.Now().UTC()
 	c.connectionID = newConnectionID(connectionStarted)
 	c.connectionLast = time.Time{}
@@ -225,6 +262,9 @@ func (c *Collector) runOnce(ctx context.Context) error {
 			return fmt.Errorf("market %s (%s) unavailable", asset.Symbol, asset.MarketSymbol())
 		}
 		c.marketIDs[strconv.Itoa(int(market.MarketID))] = asset.Symbol
+		c.instrumentMu.Lock()
+		c.instruments[asset.Symbol] = oracleInstrument{Asset: asset.Symbol, Venue: "lighter", VenueSymbol: market.Symbol, MarketID: market.MarketID, Status: market.Status, MarketType: market.MarketType, MinimumSize: market.MinBaseAmount, MinimumNotional: market.MinQuoteAmount, PriceDecimals: market.PriceDecimals, SizeDecimals: market.SizeDecimals}
+		c.instrumentMu.Unlock()
 		for _, prefix := range []string{"ticker/", "trade/", "order_book/"} {
 			if err := subscribe(prefix + strconv.Itoa(int(market.MarketID))); err != nil {
 				return err
@@ -286,6 +326,35 @@ func (c *Collector) record(message []byte) error {
 			}
 		}
 	}
+	asset := c.assetForChannel(channel)
+	oracleEvents, oracleCheckpoints, err := c.oracle.accept(message, asset, receivedAt, c.connectionID)
+	if err != nil {
+		c.Status.mu.Lock()
+		c.Status.OracleParityFailures++
+		c.Status.OracleLastError = err.Error()
+		if asset != "" {
+			c.oracleParityOK[asset] = false
+		}
+		c.Status.OracleParityReady = c.oracleParityCount()
+		c.Status.mu.Unlock()
+		// The Oracle remains a shadow consumer until parity is proven. It must
+		// never interrupt authoritative raw recording.
+		oracleEvents, oracleCheckpoints = 0, 0
+	} else if strings.Contains(channel, "order_book") && asset != "" {
+		c.Status.mu.Lock()
+		if !c.oracleParity(channel, asset) {
+			c.Status.OracleParityFailures++
+			c.Status.OracleLastError = "book parity mismatch for " + asset
+			c.oracleParityOK[asset] = false
+		} else {
+			c.oracleParityOK[asset] = true
+			if c.oracleParityCount() == len(universe.All()) {
+				c.Status.OracleLastError = ""
+			}
+		}
+		c.Status.OracleParityReady = c.oracleParityCount()
+		c.Status.mu.Unlock()
+	}
 	if strings.Contains(channel, "trade") {
 		if err := c.recordLiquidationResearch(channel, envelope, record["received_at"].(time.Time)); err != nil {
 			return err
@@ -297,9 +366,43 @@ func (c *Collector) record(message []byte) error {
 	c.Status.mu.Lock()
 	c.Status.Events++
 	c.Status.LastEvent = receivedAt
+	c.Status.OracleEvents += uint64(oracleEvents)
+	c.Status.OracleCheckpoints += uint64(oracleCheckpoints)
+	c.Status.OracleBooksReady = c.oracle.hub.ReadyBooks()
+	c.Status.OracleSubscriberDrops = c.oracle.hub.Dropped()
 	c.Status.mu.Unlock()
 	c.connectionLast = receivedAt
 	return nil
+}
+
+func (c *Collector) oracleParityCount() int {
+	ready := 0
+	for _, ok := range c.oracleParityOK {
+		if ok {
+			ready++
+		}
+	}
+	return ready
+}
+
+func (c *Collector) oracleParity(channel, asset string) bool {
+	legacy := c.books[channel]
+	shadow, ok := c.oracle.hub.Book(asset)
+	if legacy == nil || !ok || len(shadow.Bids) == 0 || len(shadow.Asks) == 0 {
+		return false
+	}
+	legacyBid, legacyAsk := bestPrices(legacy)
+	shadowBid, bidErr := strconv.ParseFloat(shadow.Bids[0].Price, 64)
+	shadowAsk, askErr := strconv.ParseFloat(shadow.Asks[0].Price, 64)
+	return bidErr == nil && askErr == nil && legacyBid == shadowBid && legacyAsk == shadowAsk && len(legacy.Bids) == len(shadow.Bids) && len(legacy.Asks) == len(shadow.Asks)
+}
+
+func (c *Collector) assetForChannel(channel string) string {
+	parts := strings.FieldsFunc(channel, func(r rune) bool { return r == ':' || r == '/' })
+	if len(parts) == 2 {
+		return c.marketIDs[parts[1]]
+	}
+	return ""
 }
 
 func (c *Collector) recordStream(channel string) string {
@@ -439,8 +542,27 @@ func (c *Collector) Handler() http.Handler {
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(status)
 	})
+	mux.HandleFunc("GET /v1/books/{asset}", c.oracle.hub.ServeBook)
+	mux.HandleFunc("GET /v1/market/{asset}", c.oracle.hub.ServeMarket)
+	mux.HandleFunc("GET /v1/live", c.oracle.hub.ServeWS)
+	mux.HandleFunc("GET /v1/instruments", c.serveInstruments)
 	return mux
 }
+
+func (c *Collector) serveInstruments(w http.ResponseWriter, _ *http.Request) {
+	c.instrumentMu.RLock()
+	defer c.instrumentMu.RUnlock()
+	items := make([]oracleInstrument, 0, len(c.instruments))
+	for _, asset := range universe.All() {
+		if item, ok := c.instruments[asset.Symbol]; ok {
+			items = append(items, item)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "oracle-instruments-v1", "instruments": items, "count": len(items)})
+}
+
+func (c *Collector) OracleHub() *live.Hub { return c.oracle.hub }
 
 func streamName(channel string) string {
 	switch {

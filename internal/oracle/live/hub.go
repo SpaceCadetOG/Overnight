@@ -1,0 +1,254 @@
+// Package live provides the bounded, in-memory distribution layer for
+// normalized Oracle events. Durable history remains in the recorder store.
+package live
+
+import (
+	"encoding/json"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/ogtrading/overnight-strategy/internal/oracle/book"
+	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
+)
+
+type subscription struct {
+	assets  map[string]bool
+	streams map[model.Stream]bool
+	queue   chan model.Envelope
+}
+
+// Hub retains only current full-depth books and bounded subscriber queues.
+// It is not the durable system of record.
+type Hub struct {
+	mu          sync.RWMutex
+	subscribers map[*subscription]struct{}
+	books       map[string]book.Snapshot
+	latest      map[string]map[model.Stream]model.Envelope
+	dropped     uint64
+	recent      []model.Envelope
+	recentLimit int
+}
+
+func New() *Hub {
+	return &Hub{subscribers: map[*subscription]struct{}{}, books: map[string]book.Snapshot{}, latest: map[string]map[model.Stream]model.Envelope{}, recentLimit: 120000}
+}
+
+func (h *Hub) SetBook(value book.Snapshot) {
+	h.mu.Lock()
+	h.books[value.Asset] = value
+	h.mu.Unlock()
+}
+
+func (h *Hub) ResetBooks() {
+	h.mu.Lock()
+	h.books = map[string]book.Snapshot{}
+	for subscriber := range h.subscribers {
+		close(subscriber.queue)
+		delete(h.subscribers, subscriber)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Hub) Book(asset string) (book.Snapshot, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	value, ok := h.books[strings.ToUpper(asset)]
+	return value, ok
+}
+
+func (h *Hub) ReadyBooks() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.books)
+}
+
+func (h *Hub) Dropped() uint64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.dropped
+}
+
+func (h *Hub) Publish(event model.Envelope) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.recent = append(h.recent, event)
+	if h.latest[event.Asset] == nil {
+		h.latest[event.Asset] = map[model.Stream]model.Envelope{}
+	}
+	h.latest[event.Asset][event.Stream] = event
+	if overflow := len(h.recent) - h.recentLimit; overflow > 0 {
+		copy(h.recent, h.recent[overflow:])
+		h.recent = h.recent[:h.recentLimit]
+	}
+	for subscriber := range h.subscribers {
+		if len(subscriber.assets) > 0 && !subscriber.assets[event.Asset] {
+			continue
+		}
+		if len(subscriber.streams) > 0 && !subscriber.streams[event.Stream] {
+			continue
+		}
+		select {
+		case subscriber.queue <- event:
+		default:
+			h.dropped++
+			close(subscriber.queue)
+			delete(h.subscribers, subscriber)
+		}
+	}
+}
+
+func (h *Hub) ServeBook(w http.ResponseWriter, r *http.Request) {
+	asset := strings.ToUpper(r.PathValue("asset"))
+	value, ok := h.Book(asset)
+	if !ok {
+		http.Error(w, "book unavailable until a fresh snapshot is synchronized", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (h *Hub) ServeMarket(w http.ResponseWriter, r *http.Request) {
+	asset := strings.ToUpper(r.PathValue("asset"))
+	h.mu.RLock()
+	value, bookReady := h.books[asset]
+	latest := map[model.Stream]model.Envelope{}
+	for stream, event := range h.latest[asset] {
+		latest[stream] = event
+	}
+	h.mu.RUnlock()
+	if !bookReady && len(latest) == 0 {
+		http.Error(w, "market unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	asOf := value.At
+	for _, event := range latest {
+		if event.OracleReceivedAt.After(asOf) {
+			asOf = event.OracleReceivedAt
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "oracle-market-snapshot-v1", "asset": asset, "as_of": asOf, "book_ready": bookReady, "book": value, "latest": latest})
+}
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  4096,
+	WriteBufferSize: 64 * 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		host := r.Host
+		return strings.HasPrefix(host, "127.0.0.1:") || strings.HasPrefix(host, "localhost:")
+	},
+}
+
+func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	var since time.Time
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			http.Error(w, "since must be RFC3339", http.StatusBadRequest)
+			return
+		}
+		since = parsed.UTC()
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	subscriber := &subscription{assets: parseAssets(r.URL.Query().Get("assets")), streams: parseStreams(r.URL.Query().Get("streams")), queue: make(chan model.Envelope, 4096)}
+	h.mu.Lock()
+	h.subscribers[subscriber] = struct{}{}
+	initial := make([]book.Snapshot, 0, len(h.books))
+	for asset, snapshot := range h.books {
+		if len(subscriber.assets) == 0 || subscriber.assets[asset] {
+			initial = append(initial, snapshot)
+		}
+	}
+	backfill := make([]model.Envelope, 0)
+	for _, event := range h.recent {
+		if since.IsZero() || event.OracleReceivedAt.Before(since) {
+			continue
+		}
+		if len(subscriber.assets) > 0 && !subscriber.assets[event.Asset] {
+			continue
+		}
+		if len(subscriber.streams) > 0 && !subscriber.streams[event.Stream] {
+			continue
+		}
+		backfill = append(backfill, event)
+	}
+	oldest := time.Time{}
+	if len(h.recent) > 0 {
+		oldest = h.recent[0].OracleReceivedAt
+	}
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		if _, ok := h.subscribers[subscriber]; ok {
+			delete(h.subscribers, subscriber)
+			close(subscriber.queue)
+		}
+		h.mu.Unlock()
+	}()
+	sort.Slice(initial, func(i, j int) bool { return initial[i].Asset < initial[j].Asset })
+	if err := conn.WriteJSON(map[string]any{"type": "backfill_start", "events": len(backfill), "oldest_available": oldest, "truncated": !since.IsZero() && !oldest.IsZero() && since.Before(oldest)}); err != nil {
+		return
+	}
+	for _, event := range backfill {
+		if err := conn.WriteJSON(map[string]any{"type": "backfill_event", "event": event}); err != nil {
+			return
+		}
+	}
+	for _, snapshot := range initial {
+		if err := conn.WriteJSON(map[string]any{"type": "book_snapshot", "snapshot": snapshot}); err != nil {
+			return
+		}
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "synchronized", "books": len(initial), "at": time.Now().UTC()}); err != nil {
+		return
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case event, ok := <-subscriber.queue:
+			if !ok {
+				return
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteJSON(map[string]any{"type": "event", "event": event}); err != nil {
+				return
+			}
+		case at := <-heartbeat.C:
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteJSON(map[string]any{"type": "heartbeat", "at": at.UTC(), "books": h.ReadyBooks()}); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func parseAssets(value string) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.ToUpper(strings.TrimSpace(item)); item != "" {
+			out[item] = true
+		}
+	}
+	return out
+}
+
+func parseStreams(value string) map[model.Stream]bool {
+	out := map[model.Stream]bool{}
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out[model.Stream(item)] = true
+		}
+	}
+	return out
+}

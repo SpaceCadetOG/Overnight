@@ -39,7 +39,7 @@ func main() {
 	c := collector.New(os.Getenv("LIGHTER_BASE_URL"), os.Getenv("LIGHTER_WS_URL"), events)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	server := &http.Server{Addr: ":" + *port, Handler: c.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: "127.0.0.1:" + *port, Handler: c.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)

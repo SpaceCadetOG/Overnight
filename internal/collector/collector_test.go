@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
 	"github.com/ogtrading/overnight-strategy/internal/store"
 )
 
@@ -50,6 +51,55 @@ func TestOrderBookSnapshotAndIncrementalReconstruction(t *testing.T) {
 	status := c.Status.Snapshot()
 	if status.BooksReady != 1 || status.Snapshots != 1 || status.NonceGaps != 0 {
 		t.Fatalf("unexpected status: %+v", status)
+	}
+}
+
+func TestOracleShadowBookParityAndCheckpoint(t *testing.T) {
+	s := &memoryStore{}
+	c := New("", "", s)
+	c.marketIDs["1"] = "BTC"
+	c.connectionID = "conn-1"
+	for _, message := range []string{
+		`{"channel":"order_book:1","type":"subscribed/order_book","order_book":{"asks":[{"price":"101","size":"2"}],"bids":[{"price":"99","size":"3"}],"begin_nonce":0,"nonce":10}}`,
+		`{"channel":"order_book:1","type":"update/order_book","order_book":{"asks":[{"price":"101","size":"0"},{"price":"102","size":"4"}],"bids":[{"price":"99","size":"5"}],"begin_nonce":10,"nonce":12}}`,
+	} {
+		if err := c.record([]byte(message)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := c.Status.Snapshot()
+	if status.OracleBooksReady != 1 || status.OracleParityReady != 1 || status.OracleEvents != 2 || status.OracleParityFailures != 0 {
+		t.Fatalf("Oracle status=%+v", status)
+	}
+	if len(s.records["asset=BTC/oracle_book_checkpoints"]) != 1 {
+		t.Fatalf("checkpoints=%d", len(s.records["asset=BTC/oracle_book_checkpoints"]))
+	}
+	snapshot, ok := c.oracle.hub.Book("BTC")
+	if !ok || len(snapshot.Asks) != 1 || snapshot.Asks[0].Price != "102" || snapshot.Bids[0].Size != "5" {
+		t.Fatalf("Oracle snapshot=%+v", snapshot)
+	}
+}
+
+func TestLiquidityChangesArePersistedWithPriorAndNewSize(t *testing.T) {
+	s := &memoryStore{}
+	pipeline := newOraclePipeline(s)
+	pipeline.replaceLevels("BTC", model.Book{Bids: []model.Level{{Price: "99", Size: "3"}}, Asks: []model.Level{{Price: "101", Size: "2"}}})
+	at := time.Date(2026, 9, 14, 14, 0, 0, 0, time.UTC)
+	event, err := model.New("BTC", model.StreamBookDelta, 2, 12, at, "conn-1", model.QualityCertified, model.Book{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline.observeDelta("BTC", model.Book{Bids: []model.Level{{Price: "99", Size: "5"}}, Asks: []model.Level{{Price: "101", Size: "0"}, {Price: "102", Size: "4"}}}, event, at)
+	if err := pipeline.flushObservations("BTC", at.Add(time.Second), "conn-1", true); err != nil {
+		t.Fatal(err)
+	}
+	rows := s.records["asset=BTC/liquidity_observations"]
+	if len(rows) != 1 {
+		t.Fatalf("observation batches=%d", len(rows))
+	}
+	batch := rows[0].(liquidityObservationBatch)
+	if len(batch.Changes) != 3 || batch.Changes[0].PreviousSize != "3" || batch.Changes[0].NewSize != "5" || batch.Changes[0].SizeDelta != "2" || batch.Changes[1].Action != "REMOVED" || batch.Changes[2].Action != "ADDED" {
+		t.Fatalf("changes=%+v", batch.Changes)
 	}
 }
 

@@ -49,7 +49,7 @@ ssh "$host" "sudo /opt/overnight-strategy/scripts/activate-release.sh '$release_
 
 attempt=0
 while [ "$attempt" -lt 30 ]; do
-    if ssh "$host" "curl --fail --silent http://127.0.0.1:8082/healthz | jq -e '.connected == true and .books_ready == 12 and .nonce_gaps == 0 and (.crossed_books // 0) == 0 and (.invalid_levels // 0) == 0' >/dev/null && curl --fail --silent http://127.0.0.1:8083/healthz | jq -e '.service == \"Market Data Oracle\" and .mode == \"read-only\"' >/dev/null && systemctl is-active --quiet lightercollector.service traderuntime.service oracleapi.service && ss -H -ltn 'sport = :8083' | awk '{print $4}' | grep -qx '127.0.0.1:8083'"; then
+    if ssh "$host" "curl --fail --silent http://127.0.0.1:8082/healthz | jq -e '.connected == true and .books_ready == 12 and .oracle_books_ready == 12 and .oracle_parity_ready == 12 and .oracle_last_error == null and .nonce_gaps == 0 and (.crossed_books // 0) == 0 and (.invalid_levels // 0) == 0' >/dev/null && curl --fail --silent http://127.0.0.1:8083/healthz | jq -e '.service == \"Market Data Oracle\" and .mode == \"read-only\"' >/dev/null && curl --fail --silent http://127.0.0.1:8083/v1/readiness | jq -e '.ready == true' >/dev/null && systemctl is-active --quiet lightercollector.service traderuntime.service oracleapi.service && ss -H -ltn 'sport = :8083' | awk '{print $4}' | grep -qx '127.0.0.1:8083'"; then
         printf '%s\n' "TradePi deployment verified release=$release_id"
         exit 0
     fi
