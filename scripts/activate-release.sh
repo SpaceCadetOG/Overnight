@@ -2,7 +2,7 @@
 set -eu
 
 release=${1:?release, rollback, or version is required}
-activator_version=2
+activator_version=3
 if [ "$release" = version ]; then
     printf '%s\n' "$activator_version"
     exit 0
