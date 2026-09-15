@@ -194,6 +194,9 @@ func (s *Server) loadLiquidity(r *http.Request, in analyticsInput) ([]liquidityO
 }
 
 func (s *Server) scanArchiveFiles(r *http.Request, in analyticsInput, rel string, consume func([]byte) error) ([]string, []string, error) {
+	if packages, qualities, used, err := s.scanIndexedArchiveFiles(r, in, rel, consume); used {
+		return packages, qualities, err
+	}
 	dates, err := chicagoDates(in.From, in.To)
 	if err != nil {
 		return nil, nil, err

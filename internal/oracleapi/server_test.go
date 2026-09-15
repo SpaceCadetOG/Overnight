@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +163,98 @@ func TestHistoricalTapeIsNormalizedFilteredAndPaginated(t *testing.T) {
 	}
 	if strings.Contains(second.Body.String(), `"trade_id":"41"`) || !strings.Contains(second.Body.String(), `"trade_id":"42"`) {
 		t.Fatalf("bad second page: %s", second.Body.String())
+	}
+}
+
+func TestHourlyTradeIndexServesAnalyticsWithoutScanningSource(t *testing.T) {
+	server := fixture(t)
+	path := "/v1/candles?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z&interval=1m"
+	raw := httptest.NewRecorder()
+	server.Handler().ServeHTTP(raw, httptest.NewRequest(http.MethodGet, path, nil))
+	if raw.Code != http.StatusOK || !strings.Contains(raw.Body.String(), `"query_mode":"RAW_SCAN"`) {
+		t.Fatalf("raw status=%d body=%s", raw.Code, raw.Body.String())
+	}
+	if err := BuildIndexes(server.root, server.indexRoot, "lighter-2026-09-08"); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildIndexes(server.root, server.indexRoot, "lighter-2026-09-08"); err != nil {
+		t.Fatalf("idempotent rebuild failed: %v", err)
+	}
+	index, err := loadIndexManifest(filepath.Join(server.indexRoot, "lighter-2026-09-08", "INDEX.json"))
+	if err != nil || index.SchemaVersion != indexSchema || len(index.Partitions) != 3 {
+		t.Fatalf("index=%+v err=%v", index, err)
+	}
+	source := filepath.Join(server.root, "date=2026-09-08", "asset=BTC", "trade_flow.jsonl.zst")
+	if err := os.Rename(source, source+".offline"); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRecorder()
+	server.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, path, nil))
+	if r.Code != http.StatusOK || !strings.Contains(r.Body.String(), `"trades":2`) || !strings.Contains(r.Body.String(), `"query_mode":"INDEXED_HOURLY"`) {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	var rawValue, indexedValue map[string]any
+	if json.Unmarshal(raw.Body.Bytes(), &rawValue) != nil || json.Unmarshal(r.Body.Bytes(), &indexedValue) != nil {
+		t.Fatal("unable to decode parity responses")
+	}
+	delete(rawValue, "query_mode")
+	delete(indexedValue, "query_mode")
+	if !reflect.DeepEqual(rawValue, indexedValue) {
+		t.Fatalf("indexed response differs from raw response\nraw=%v\nindexed=%v", rawValue, indexedValue)
+	}
+}
+
+func TestHourlyTradeIndexRejectsCorruptPartition(t *testing.T) {
+	server := fixture(t)
+	if err := BuildIndexes(server.root, server.indexRoot, "lighter-2026-09-08"); err != nil {
+		t.Fatal(err)
+	}
+	index, err := loadIndexManifest(filepath.Join(server.indexRoot, "lighter-2026-09-08", "INDEX.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tradePartition IndexPartition
+	for _, partition := range index.Partitions {
+		if partition.Stream == "trade" {
+			tradePartition = partition
+		}
+	}
+	if tradePartition.Path == "" {
+		t.Fatal("trade partition missing")
+	}
+	path := filepath.Join(server.indexRoot, "lighter-2026-09-08", filepath.FromSlash(tradePartition.Path))
+	if err := os.WriteFile(path, []byte("corrupt"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRecorder()
+	server.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/v1/profiles?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z", nil))
+	if r.Code != http.StatusUnprocessableEntity || !strings.Contains(r.Body.String(), "checksum mismatch") {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
+
+func TestHourlyIndexServesHeatmapAndOpenInterest(t *testing.T) {
+	server := fixture(t)
+	if err := BuildIndexes(server.root, server.indexRoot, "lighter-2026-09-08"); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{
+		filepath.Join(server.root, "date=2026-09-08", "asset=BTC", "liquidity_observations.jsonl.zst"),
+		filepath.Join(server.root, "date=2026-09-08", "market_stats.jsonl.zst"),
+	} {
+		if err := os.Rename(source, source+".offline"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{
+		"/v1/heatmap?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z",
+		"/v1/open-interest?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z",
+	} {
+		r := httptest.NewRecorder()
+		server.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, path, nil))
+		if r.Code != http.StatusOK {
+			t.Fatalf("path=%s status=%d body=%s", path, r.Code, r.Body.String())
+		}
 	}
 }
 

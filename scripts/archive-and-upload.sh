@@ -5,11 +5,14 @@ export TZ=America/Chicago
 root=${COLLECTOR_ROOT:-/mnt/trading/recorder/lighter}
 day=${1:-$(date -d yesterday +%F)}
 archive_bin=${COLLECTOR_ARCHIVE_BIN:-/opt/overnight-strategy/current/bin/collectorarchive}
+index_bin=${ORACLE_INDEX_BIN:-/opt/overnight-strategy/current/bin/oracleindex}
+index_root=${ORACLE_INDEX_ROOT:-/mnt/trading/oracle/index}
 
 # Keep source JSONL on TradePi. Compression and local validation are not
 # sufficient authority to delete recorder data; cloud acknowledgement is the
 # later deletion gate.
 "$archive_bin" -root "$root" -date "$day" -remove-raw=false
+"$index_bin" -root "$root" -index-root "$index_root" -package "lighter-$day"
 
 day_dir="$root/date=$day"
 if [ -z "${CLOUD_REMOTE:-}" ]; then
