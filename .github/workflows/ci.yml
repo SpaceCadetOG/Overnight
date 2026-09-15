@@ -178,5 +178,10 @@ jobs:
         working-directory: dist/linux-arm64
         run: sha256sum --check SHA256SUMS
 
+      - name: Restore release executable permissions
+        run: |
+          chmod 0755 dist/linux-arm64/bin/*
+          chmod 0755 dist/linux-arm64/scripts/*.sh
+
       - name: Deploy atomically and verify health
         run: scripts/deploy-tradepi.sh dist/linux-arm64 "${GITHUB_SHA}" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
