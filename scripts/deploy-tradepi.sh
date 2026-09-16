@@ -30,6 +30,7 @@ done
     exit 1
 }
 [ -x "$artifact_dir/scripts/archive-and-upload.sh" ] &&
+[ -x "$artifact_dir/scripts/backfill-oracle-indexes.sh" ] &&
 [ -x "$artifact_dir/scripts/check-recorder-health.sh" ] &&
 [ -x "$artifact_dir/scripts/check-trading-disk.sh" ] &&
 [ -x "$artifact_dir/scripts/generate-daily-report.sh" ] || {

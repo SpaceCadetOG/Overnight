@@ -26,6 +26,7 @@ else
     target="$root/releases/$release"
     for binary in $required; do [ -x "$target/bin/$binary" ]; done
     [ -x "$target/scripts/archive-and-upload.sh" ]
+    [ -x "$target/scripts/backfill-oracle-indexes.sh" ]
     [ -x "$target/scripts/check-recorder-health.sh" ]
     [ -x "$target/scripts/check-trading-disk.sh" ]
     [ -x "$target/scripts/generate-daily-report.sh" ]
