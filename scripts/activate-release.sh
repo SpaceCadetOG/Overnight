@@ -10,7 +10,7 @@ fi
 root=/opt/overnight-strategy
 current="$root/current"
 previous="$root/previous"
-required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime oracleapi recordercert"
+required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime oracleapi oracleindex recordercert"
 
 mkdir -p "$root/releases" /var/lib/overnight
 exec 9>"$root/deploy-lock"

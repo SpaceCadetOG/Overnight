@@ -9,7 +9,7 @@ release_id="$commit-$build_id"
 release_root=/opt/overnight-strategy/releases
 staging="$release_root/$release_id"
 temporary="$release_root/.staging-$release_id"
-required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime oracleapi recordercert"
+required="lightercollector dailyplans dailylevels dailyreport eodexport tradedashboard collectorarchive packagevalidator lighterexecutor traderuntime oracleapi oracleindex recordercert"
 
 for binary in $required; do
     [ -x "$artifact_dir/bin/$binary" ] || {

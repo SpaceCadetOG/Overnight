@@ -12,9 +12,10 @@ import (
 
 func main() {
 	root := flag.String("root", "/mnt/trading/recorder/lighter", "sealed recorder archive root")
+	indexRoot := flag.String("index-root", "/mnt/trading/oracle/index", "derived Oracle index root")
 	address := flag.String("listen", "127.0.0.1:8083", "read-only API listen address")
 	flag.Parse()
-	server, err := oracleapi.New(*root, buildinfo.Version, buildinfo.Commit)
+	server, err := oracleapi.NewWithIndex(*root, *indexRoot, buildinfo.Version, buildinfo.Commit)
 	if err != nil {
 		log.Fatal(err)
 	}

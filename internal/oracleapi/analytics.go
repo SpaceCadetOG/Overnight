@@ -130,7 +130,7 @@ func (s *Server) candles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "CANDLES", "asset": in.Asset, "from": in.From, "to": in.To, "interval": interval.String(), "candles": buildCandles(trades, interval), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "CANDLES", "asset": in.Asset, "from": in.From, "to": in.To, "interval": interval.String(), "candles": buildCandles(trades, interval), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "query_mode": source.QueryMode, "information_cutoff": in.To})
 }
 
 func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +152,7 @@ func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "VOLUME_PROFILE", "profile_model": "trade-volume-at-price-v1", "session_definition_version": sessionDefinitionVersion, "period": in.Period, "session": in.Session, "asset": in.Asset, "from": in.From, "to": in.To, "value_area_fraction": valueArea, "profile": profile, "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "VOLUME_PROFILE", "profile_model": "trade-volume-at-price-v1", "session_definition_version": sessionDefinitionVersion, "period": in.Period, "session": in.Session, "asset": in.Asset, "from": in.From, "to": in.To, "value_area_fraction": valueArea, "profile": profile, "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "query_mode": source.QueryMode, "information_cutoff": in.To})
 }
 
 func (s *Server) footprints(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +175,7 @@ func (s *Server) footprints(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "FOOTPRINT", "asset": in.Asset, "from": in.From, "to": in.To, "interval": interval.String(), "footprints": buildFootprints(trades, interval), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "FOOTPRINT", "asset": in.Asset, "from": in.From, "to": in.To, "interval": interval.String(), "footprints": buildFootprints(trades, interval), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "query_mode": source.QueryMode, "information_cutoff": in.To})
 }
 
 func (s *Server) orderFlow(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +193,7 @@ func (s *Server) orderFlow(w http.ResponseWriter, r *http.Request) {
 	buy, sell, notional, count := accumulator.buy, accumulator.sell, accumulator.weighted, accumulator.trades
 	cvd := buy - sell
 	duration := in.To.Sub(in.From).Seconds()
-	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "ORDER_FLOW", "asset": in.Asset, "from": in.From, "to": in.To, "trades": count, "buy_volume": decimal(buy), "sell_volume": decimal(sell), "total_volume": decimal(buy + sell), "delta": decimal(cvd), "cvd": decimal(cvd), "delta_rate_per_second": decimal(cvd / duration), "notional": decimal(notional), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "information_cutoff": in.To})
+	writeJSON(w, 200, map[string]any{"schema_version": analyticsSchema, "type": "ORDER_FLOW", "asset": in.Asset, "from": in.From, "to": in.To, "trades": count, "buy_volume": decimal(buy), "sell_volume": decimal(sell), "total_volume": decimal(buy + sell), "delta": decimal(cvd), "cvd": decimal(cvd), "delta_rate_per_second": decimal(cvd / duration), "notional": decimal(notional), "quality": source.Quality, "packages": source.Packages, "excluded_events": source.Excluded, "query_mode": source.QueryMode, "information_cutoff": in.To})
 }
 
 type profileAccumulator struct {

@@ -37,6 +37,7 @@ type queryResponse struct {
 	Packages   []string         `json:"packages"`
 	Quality    []string         `json:"quality"`
 	Excluded   int              `json:"excluded_events"`
+	QueryMode  string           `json:"query_mode,omitempty"`
 }
 
 type eventQuery struct {
@@ -165,7 +166,7 @@ func (s *Server) runQuery(r *http.Request, query eventQuery) (queryResponse, int
 	if err != nil {
 		return queryResponse{}, 500, err
 	}
-	result := queryResponse{Events: []model.Envelope{}, Packages: []string{}, Quality: []string{}}
+	result := queryResponse{Events: []model.Envelope{}, Packages: []string{}, Quality: []string{}, QueryMode: "RAW_SCAN"}
 	for _, date := range dates {
 		manifest, dir, err := s.find("lighter-" + date)
 		if err != nil {

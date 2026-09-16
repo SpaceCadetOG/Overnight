@@ -19,8 +19,11 @@ import (
 // It deliberately avoids retaining normalized envelopes, allowing rolling profiles
 // to operate with memory proportional to distinct price levels rather than trades.
 func (s *Server) walkAnalyticTrades(r *http.Request, in analyticsInput, consume func(analyticTrade)) (queryResponse, int, error) {
+	if result, status, used, err := s.walkIndexedAnalyticTrades(r, in, consume); used {
+		return result, status, err
+	}
 	dates, err := chicagoDates(in.From, in.To)
-	result := queryResponse{Events: []model.Envelope{}, Packages: []string{}, Quality: []string{}}
+	result := queryResponse{Events: []model.Envelope{}, Packages: []string{}, Quality: []string{}, QueryMode: "RAW_SCAN"}
 	if err != nil {
 		return result, 500, err
 	}

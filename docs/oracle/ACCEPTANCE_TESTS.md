@@ -22,6 +22,10 @@ go test ./internal/oracleapi ./internal/oracle/live \
   ./internal/oracle/book ./internal/oracle/normalize/lighter -count=1 -v
 ```
 
+Index acceptance additionally verifies atomic publication, source checksum
+binding, hourly selection, trade/profile parity, heatmap/OI reads without the
+raw source file, and fail-closed behavior for corrupted partitions.
+
 Production acceptance additionally requires the deployed commit to match the
 intended release and the collector health response to report zero nonce gaps,
 crossed books, invalid levels, parity failures, and subscriber drops.

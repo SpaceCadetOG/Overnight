@@ -8,6 +8,10 @@ and quality state. Quarantined archives are rejected unless a research caller
 explicitly opts into uncertified data. Session Map must not execute from
 uncertified or stale responses.
 
+Trade analytics also include `query_mode`. `INDEXED_HOURLY` means the request
+used checksum-verified asset/hour shards. `RAW_SCAN` is the compatibility path
+for a sealed package that has not been indexed yet.
+
 ## Endpoints
 
 | Endpoint | Purpose |
@@ -41,6 +45,27 @@ Candles, footprints, heatmaps, liquidity evidence, and OI calls are limited to
 
 The labels `LIKELY_EXECUTED` and `LIKELY_CANCELLED` are correlation inferences.
 They do not claim access to an exchange's private order lifecycle.
+
+## Historical query index
+
+The immutable daily packages remain the source of truth. The derived query
+store lives at `/mnt/trading/oracle/index` and contains hourly Zstandard shards
+for trades, liquidity observations, and market statistics. Every shard has its
+own SHA-256 checksum and the index manifest pins the source checksums.
+
+The daily archive lifecycle builds the index automatically before cloud upload.
+To index an existing sealed package manually:
+
+```text
+/opt/overnight-strategy/current/bin/oracleindex \
+  -root /mnt/trading/recorder/lighter \
+  -index-root /mnt/trading/oracle/index \
+  -package lighter-2026-09-10
+```
+
+Index publication is atomic and idempotent. An incomplete build is never made
+visible to API readers. A missing index uses the raw compatibility path; an
+invalid or corrupted published index fails closed.
 
 ## Acceptance
 

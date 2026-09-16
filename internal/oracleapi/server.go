@@ -57,6 +57,7 @@ type Manifest struct {
 
 type Server struct {
 	root       string
+	indexRoot  string
 	version    string
 	commit     string
 	startedAt  time.Time
@@ -73,6 +74,10 @@ type cachedChecksum struct {
 }
 
 func New(root, version, commit string) (*Server, error) {
+	return NewWithIndex(root, filepath.Join(root, ".oracle-index"), version, commit)
+}
+
+func NewWithIndex(root, indexRoot, version, commit string) (*Server, error) {
 	if root == "" {
 		return nil, errors.New("archive root is required")
 	}
@@ -83,7 +88,7 @@ func New(root, version, commit string) (*Server, error) {
 	backend, _ := url.Parse("http://127.0.0.1:8082")
 	proxy := httputil.NewSingleHostReverseProxy(backend)
 	proxy.FlushInterval = -1
-	return &Server{root: root, version: version, commit: commit, startedAt: time.Now().UTC(), querySlot: make(chan struct{}, 1), checksums: map[string]cachedChecksum{}, liveProxy: proxy}, nil
+	return &Server{root: root, indexRoot: indexRoot, version: version, commit: commit, startedAt: time.Now().UTC(), querySlot: make(chan struct{}, 1), checksums: map[string]cachedChecksum{}, liveProxy: proxy}, nil
 }
 
 func (s *Server) Handler() http.Handler {
