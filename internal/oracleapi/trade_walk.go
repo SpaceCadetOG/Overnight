@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
@@ -30,6 +31,13 @@ func (s *Server) walkAnalyticTrades(r *http.Request, in analyticsInput, consume 
 	for _, date := range dates {
 		manifest, dir, err := s.find("lighter-" + date)
 		if err != nil {
+			used, scanErr := s.walkDevelopingTrades(r, date, in, consume, &result)
+			if scanErr != nil {
+				return result, 500, scanErr
+			}
+			if used {
+				continue
+			}
 			return result, 404, fmt.Errorf("archive for Chicago date %s is unavailable", date)
 		}
 		quality, status, err := usableQuality(manifest, in.Allow)
@@ -121,4 +129,60 @@ func (s *Server) walkAnalyticTrades(r *http.Request, in analyticsInput, consume 
 		return result, 404, fmt.Errorf("trade stream is unavailable in matching archives")
 	}
 	return result, 200, nil
+}
+
+func (s *Server) walkDevelopingTrades(r *http.Request, date string, in analyticsInput, consume func(analyticTrade), result *queryResponse) (bool, error) {
+	path := filepath.Join(s.root, "date="+date, "asset="+in.Asset, "oracle_events.jsonl")
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), 32<<20)
+	observedFrom, observedTo := time.Time{}, time.Time{}
+	for scanner.Scan() {
+		if err := r.Context().Err(); err != nil {
+			return true, err
+		}
+		var event model.Envelope
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Stream != model.StreamTrade {
+			continue
+		}
+		at := eventTime(event)
+		if at.Before(in.From) || !at.Before(in.To) {
+			continue
+		}
+		var value model.Trade
+		if json.Unmarshal(event.Payload, &value) != nil {
+			continue
+		}
+		price, pe := strconv.ParseFloat(value.Price, 64)
+		size, se := strconv.ParseFloat(value.Size, 64)
+		if pe != nil || se != nil || price <= 0 || size <= 0 {
+			continue
+		}
+		consume(analyticTrade{At: at, Price: price, Size: size, Notional: price * size, Buy: strings.EqualFold(value.AggressorSide, "BUY")})
+		if observedFrom.IsZero() || at.Before(observedFrom) {
+			observedFrom = at
+		}
+		if at.After(observedTo) {
+			observedTo = at
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return true, err
+	}
+	result.Packages = append(result.Packages, "developing-"+date)
+	result.Quality = appendUnique(result.Quality, string(model.QualityCertified))
+	result.QueryMode = "DEVELOPING_HOT_STORE"
+	state := "DEVELOPING_NO_OBSERVATIONS"
+	if !observedFrom.IsZero() {
+		state = "DEVELOPING_PARTIAL"
+	}
+	result.Coverage = &queryCoverage{State: state, RequestedFrom: in.From, RequestedTo: in.To, ObservedFrom: observedFrom, ObservedTo: observedTo, Developing: true}
+	return true, nil
 }

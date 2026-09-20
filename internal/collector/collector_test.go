@@ -3,6 +3,8 @@ package collector
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -74,9 +76,33 @@ func TestOracleShadowBookParityAndCheckpoint(t *testing.T) {
 	if len(s.records["asset=BTC/oracle_book_checkpoints"]) != 1 {
 		t.Fatalf("checkpoints=%d", len(s.records["asset=BTC/oracle_book_checkpoints"]))
 	}
+	if len(s.records["asset=BTC/oracle_events"]) != 2 {
+		t.Fatalf("normalized events=%d", len(s.records["asset=BTC/oracle_events"]))
+	}
 	snapshot, ok := c.oracle.hub.Book("BTC")
 	if !ok || len(snapshot.Asks) != 1 || snapshot.Asks[0].Price != "102" || snapshot.Bids[0].Size != "5" {
 		t.Fatalf("Oracle snapshot=%+v", snapshot)
+	}
+}
+
+func TestLiveOrderFlowReportsCoverageAndCVD(t *testing.T) {
+	c := New("", "", &memoryStore{})
+	c.marketIDs["1"] = "BTC"
+	c.connectionID = "conn-1"
+	now := time.Now().UTC()
+	message := fmt.Sprintf(`{"channel":"trade:1","trades":[{"trade_id":7,"trade_id_str":"7","timestamp":%d,"price":"100","size":"2","is_maker_ask":true},{"trade_id":8,"trade_id_str":"8","timestamp":%d,"price":"100","size":"0.5","is_maker_ask":false}]}`, now.UnixMilli(), now.UnixMilli())
+	if err := c.record([]byte(message)); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	c.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/order-flow?asset=BTC&window=5m", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	for _, expected := range []string{`"trades":2`, `"buy_volume":"2"`, `"sell_volume":"0.5"`, `"delta":"1.5"`, `"coverage_state":"DEVELOPING_PARTIAL"`} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("missing %s in %s", expected, recorder.Body.String())
+		}
 	}
 }
 

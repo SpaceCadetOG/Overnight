@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/klauspost/compress/zstd"
+	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
 )
 
 func fixture(t *testing.T) *Server {
@@ -83,6 +84,57 @@ func zstdBody(t *testing.T, value string) []byte {
 }
 
 func digest(value []byte) string { sum := sha256.Sum256(value); return hex.EncodeToString(sum[:]) }
+
+func developingFixture(t *testing.T) *Server {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "date=2026-09-20", "asset=BTC")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 20, 18, 0, 0, 0, time.UTC)
+	event, err := model.New("BTC", model.StreamTrade, 1, 77, at, "conn-live", model.QualityCertified, model.Trade{TradeID: "77", Price: "60000", Size: "2", AggressorSide: "BUY"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(event)
+	if err := os.WriteFile(filepath.Join(dir, "oracle_events.jsonl"), append(body, '\n'), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	liquidity := []byte(`{"schema_version":"oracle-liquidity-observation-v1","asset":"BTC","window_start":"2026-09-20T17:59:59Z","window_end":"2026-09-20T18:00:01Z","connection_id":"conn-live","book_quality":"CERTIFIED","observation_type":"DISPLAYED_BOOK_CHANGE","changes":[[1789927200000,"BID","59999","1","2","1","INCREASED",77,1]]}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "liquidity_observations.jsonl"), liquidity, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(root, "test", "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+func TestDevelopingStoreTradesOrderFlowAndHeatmap(t *testing.T) {
+	h := developingFixture(t).Handler()
+	paths := []struct {
+		path string
+		want []string
+	}{
+		{"/v1/trades?asset=BTC&from=2026-09-20T17:59:00Z&to=2026-09-20T18:01:00Z", []string{`"query_mode":"DEVELOPING_HOT_STORE"`, `"event_id":"evt_`, `"state":"DEVELOPING_PARTIAL"`}},
+		{"/v1/order-flow?asset=BTC&from=2026-09-20T17:59:00Z&to=2026-09-20T18:01:00Z", []string{`"buy_volume":"2"`, `"coverage":{"state":"DEVELOPING_PARTIAL"`}},
+		{"/v1/heatmap?asset=BTC&from=2026-09-20T17:59:00Z&to=2026-09-20T18:01:00Z", []string{`"state":"DEVELOPING_PARTIAL"`, `"price":"59999"`}},
+	}
+	for _, tc := range paths {
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if r.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", tc.path, r.Code, r.Body.String())
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(r.Body.String(), want) {
+				t.Fatalf("%s missing %s in %s", tc.path, want, r.Body.String())
+			}
+		}
+	}
+}
 
 func TestCatalogManifestCoverageAndQuality(t *testing.T) {
 	h := fixture(t).Handler()

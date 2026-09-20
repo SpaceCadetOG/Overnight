@@ -134,6 +134,9 @@ func (p *oraclePipeline) accept(raw []byte, asset string, received time.Time, co
 			}
 		}
 		p.hub.Publish(events[i])
+		if err := p.store.Append("asset="+asset+"/oracle_events", events[i]); err != nil {
+			return i, checkpoints, err
+		}
 	}
 	return len(events), checkpoints, nil
 }
