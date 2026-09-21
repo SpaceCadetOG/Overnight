@@ -2,6 +2,7 @@
 package book
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -182,6 +183,9 @@ func crossed(bids, asks map[string]string) bool {
 }
 
 func sorted(side map[string]string, descending bool, depth int) []model.Level {
+	if depth > 0 && depth < len(side) {
+		return topLevels(side, descending, depth)
+	}
 	prices := make([]string, 0, len(side))
 	for price := range side {
 		prices = append(prices, price)
@@ -202,6 +206,64 @@ func sorted(side map[string]string, descending bool, depth int) []model.Level {
 	out := make([]model.Level, 0, len(prices))
 	for _, price := range prices {
 		out = append(out, model.Level{Price: price, Size: side[price]})
+	}
+	return out
+}
+
+type pricedLevel struct {
+	price string
+	value *big.Rat
+}
+
+type levelHeap struct {
+	items      []pricedLevel
+	descending bool
+}
+
+func (h levelHeap) Len() int { return len(h.items) }
+func (h levelHeap) Less(i, j int) bool {
+	comparison := h.items[i].value.Cmp(h.items[j].value)
+	if h.descending {
+		return comparison < 0 // lowest bid is the worst retained bid
+	}
+	return comparison > 0 // highest ask is the worst retained ask
+}
+func (h levelHeap) Swap(i, j int)   { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *levelHeap) Push(value any) { h.items = append(h.items, value.(pricedLevel)) }
+func (h *levelHeap) Pop() any {
+	last := len(h.items) - 1
+	value := h.items[last]
+	h.items = h.items[:last]
+	return value
+}
+
+func topLevels(side map[string]string, descending bool, depth int) []model.Level {
+	selected := &levelHeap{descending: descending, items: make([]pricedLevel, 0, depth)}
+	heap.Init(selected)
+	for price := range side {
+		value := new(big.Rat)
+		value.SetString(price)
+		candidate := pricedLevel{price: price, value: value}
+		if selected.Len() < depth {
+			heap.Push(selected, candidate)
+			continue
+		}
+		comparison := value.Cmp(selected.items[0].value)
+		if (descending && comparison > 0) || (!descending && comparison < 0) {
+			selected.items[0] = candidate
+			heap.Fix(selected, 0)
+		}
+	}
+	sort.Slice(selected.items, func(i, j int) bool {
+		comparison := selected.items[i].value.Cmp(selected.items[j].value)
+		if descending {
+			return comparison > 0
+		}
+		return comparison < 0
+	})
+	out := make([]model.Level, 0, len(selected.items))
+	for _, item := range selected.items {
+		out = append(out, model.Level{Price: item.price, Size: side[item.price]})
 	}
 	return out
 }
