@@ -38,6 +38,16 @@ type queryResponse struct {
 	Quality    []string         `json:"quality"`
 	Excluded   int              `json:"excluded_events"`
 	QueryMode  string           `json:"query_mode,omitempty"`
+	Coverage   *queryCoverage   `json:"coverage,omitempty"`
+}
+
+type queryCoverage struct {
+	State         string    `json:"state"`
+	RequestedFrom time.Time `json:"requested_from"`
+	RequestedTo   time.Time `json:"requested_to"`
+	ObservedFrom  time.Time `json:"observed_from,omitempty"`
+	ObservedTo    time.Time `json:"observed_to,omitempty"`
+	Developing    bool      `json:"developing"`
 }
 
 type eventQuery struct {
@@ -170,6 +180,13 @@ func (s *Server) runQuery(r *http.Request, query eventQuery) (queryResponse, int
 	for _, date := range dates {
 		manifest, dir, err := s.find("lighter-" + date)
 		if err != nil {
+			used, scanErr := s.scanDevelopingEvents(r, date, query, &result)
+			if scanErr != nil {
+				return result, http.StatusInternalServerError, scanErr
+			}
+			if used {
+				continue
+			}
 			return result, http.StatusNotFound, fmt.Errorf("archive for Chicago date %s is unavailable", date)
 		}
 		quality, status, err := usableQuality(manifest, query.AllowUncertified)
@@ -222,6 +239,53 @@ func (s *Server) runQuery(r *http.Request, query eventQuery) (queryResponse, int
 		result.NextCursor = encodeCursor(queryCursor{At: eventTime(last), ID: last.EventID})
 	}
 	return result, 200, nil
+}
+
+func (s *Server) scanDevelopingEvents(r *http.Request, date string, query eventQuery, result *queryResponse) (bool, error) {
+	path := filepath.Join(s.root, "date="+date, "asset="+query.Asset, "oracle_events.jsonl")
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), 32<<20)
+	observedFrom, observedTo := time.Time{}, time.Time{}
+	for scanner.Scan() {
+		if err := r.Context().Err(); err != nil {
+			return true, err
+		}
+		var event model.Envelope
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || !query.Streams[event.Stream] {
+			continue
+		}
+		at := eventTime(event)
+		if at.Before(query.From) || !at.Before(query.To) || !afterCursor(event, query.After) {
+			continue
+		}
+		if observedFrom.IsZero() || at.Before(observedFrom) {
+			observedFrom = at
+		}
+		if at.After(observedTo) {
+			observedTo = at
+		}
+		result.Events = append(result.Events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return true, err
+	}
+	result.Packages = append(result.Packages, "developing-"+date)
+	result.Quality = appendUnique(result.Quality, string(model.QualityCertified))
+	result.QueryMode = "DEVELOPING_HOT_STORE"
+	state := "DEVELOPING_NO_OBSERVATIONS"
+	if !observedFrom.IsZero() {
+		state = "DEVELOPING_PARTIAL"
+	}
+	result.Coverage = &queryCoverage{State: state, RequestedFrom: query.From, RequestedTo: query.To, ObservedFrom: observedFrom, ObservedTo: observedTo, Developing: true}
+	return true, nil
 }
 
 func scanEvents(r *http.Request, path, packageDate string, query eventQuery, quality model.Quality, windows []certifiedWindow, existing []model.Envelope) ([]model.Envelope, int, error) {

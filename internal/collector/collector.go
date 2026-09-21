@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/ogtrading/overnight-strategy/internal/marketdata/lighter"
 	"github.com/ogtrading/overnight-strategy/internal/oracle/live"
+	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
 	"github.com/ogtrading/overnight-strategy/internal/universe"
 )
 
@@ -545,8 +546,75 @@ func (c *Collector) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/books/{asset}", c.oracle.hub.ServeBook)
 	mux.HandleFunc("GET /v1/market/{asset}", c.oracle.hub.ServeMarket)
 	mux.HandleFunc("GET /v1/live", c.oracle.hub.ServeWS)
+	mux.HandleFunc("GET /v1/order-flow", c.serveLiveOrderFlow)
 	mux.HandleFunc("GET /v1/instruments", c.serveInstruments)
 	return mux
+}
+
+func (c *Collector) serveLiveOrderFlow(w http.ResponseWriter, r *http.Request) {
+	asset := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("asset")))
+	if asset == "" {
+		http.Error(w, "asset is required", http.StatusBadRequest)
+		return
+	}
+	window := 5 * time.Minute
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 || parsed > 4*time.Hour {
+			http.Error(w, "window must be between 1ns and 4h", http.StatusBadRequest)
+			return
+		}
+		window = parsed
+	}
+	now := time.Now().UTC()
+	from := now.Add(-window)
+	events, oldest := c.oracle.hub.Recent(asset, map[model.Stream]bool{model.StreamTrade: true}, from)
+	buy, sell := 0.0, 0.0
+	quality := model.QualityCertified
+	cutoff := time.Time{}
+	trades := 0
+	for _, event := range events {
+		var trade model.Trade
+		if json.Unmarshal(event.Payload, &trade) != nil {
+			continue
+		}
+		size, err := strconv.ParseFloat(trade.Size, 64)
+		if err != nil || size <= 0 {
+			continue
+		}
+		if strings.EqualFold(trade.AggressorSide, "BUY") {
+			buy += size
+		} else {
+			sell += size
+		}
+		trades++
+		cutoff = event.OracleReceivedAt
+		if event.Quality != model.QualityCertified {
+			quality = event.Quality
+		}
+	}
+	coverage := "COMPLETE_WINDOW"
+	if oldest.IsZero() || oldest.After(from) {
+		coverage = "DEVELOPING_PARTIAL"
+	}
+	lag := int64(0)
+	if !cutoff.IsZero() {
+		lag = now.Sub(cutoff).Milliseconds()
+	}
+	response := map[string]any{
+		"schema_version": "oracle-live-order-flow-v1", "asset": asset,
+		"from": from, "to": now, "information_cutoff": cutoff,
+		"coverage_start": oldest, "coverage_state": coverage,
+		"trades": trades, "buy_volume": decimalFloat(buy), "sell_volume": decimalFloat(sell),
+		"total_volume": decimalFloat(buy + sell), "delta": decimalFloat(buy - sell), "cvd": decimalFloat(buy - sell),
+		"lag_ms": lag, "quality": quality,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func decimalFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func (c *Collector) serveInstruments(w http.ResponseWriter, _ *http.Request) {

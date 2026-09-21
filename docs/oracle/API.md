@@ -32,6 +32,21 @@ for a sealed package that has not been indexed yet.
 | `GET /v1/books/{asset}` | Current authoritative full-depth book |
 | `GET /v1/books/{asset}/at` | Reconstructed book at an exact timestamp |
 | `WS /v1/live` | Normalized live stream and authoritative book states |
+
+Developing-day data is available before archive sealing. Explicit `from` and
+`to` ranges read the durable hot store when a sealed package does not yet
+exist and report `query_mode: DEVELOPING_HOT_STORE` plus coverage. For the
+lowest-latency rolling trade flow, use:
+
+```text
+GET /v1/order-flow?asset=BTC&window=5m
+```
+
+The rolling response includes buy volume, sell volume, delta/CVD,
+`information_cutoff`, lag, quality, and whether the bounded live buffer fully
+covers the requested window. Developing heatmap and liquidity responses expose
+`source_coverage`; an empty developing range is never presented as proven zero
+liquidity.
 | `WS /v1/replay` | Deterministic historical replay with controls |
 | `GET /dashboard` | Hosted read-only Oracle console |
 

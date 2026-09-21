@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/ogtrading/overnight-strategy/internal/oracle/model"
 )
 
 const microstructureModel = "displayed-liquidity-correlation-v1"
@@ -81,7 +82,7 @@ func (s *Server) liquidity(w http.ResponseWriter, r *http.Request) {
 		window = time.Duration(ms) * time.Millisecond
 	}
 	evidence := correlateLiquidity(observations, trades, window)
-	writeJSON(w, 200, map[string]any{"schema_version": "oracle-liquidity-analysis-v1", "model": microstructureModel, "asset": in.Asset, "from": in.From, "to": in.To, "information_cutoff": in.To, "events": evidence, "count": len(evidence), "packages": packages, "quality": quality, "disclaimer": "Executed and cancelled labels are correlation inferences from displayed-book changes and trades, not exchange order lifecycle facts."})
+	writeJSON(w, 200, map[string]any{"schema_version": "oracle-liquidity-analysis-v1", "model": microstructureModel, "asset": in.Asset, "from": in.From, "to": in.To, "information_cutoff": in.To, "events": evidence, "count": len(evidence), "packages": packages, "quality": quality, "source_coverage": liquidityCoverage(in, observations, packages), "disclaimer": "Executed and cancelled labels are correlation inferences from displayed-book changes and trades, not exchange order lifecycle facts."})
 }
 
 func (s *Server) heatmap(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +133,36 @@ func (s *Server) heatmap(w http.ResponseWriter, r *http.Request) {
 		b, _ := strconv.ParseFloat(out[j]["price"].(string), 64)
 		return a < b
 	})
-	writeJSON(w, 200, map[string]any{"schema_version": "oracle-heatmap-v1", "model": "displayed-liquidity-heatmap-v1", "asset": in.Asset, "from": in.From, "to": in.To, "information_cutoff": in.To, "levels": out, "packages": packages, "quality": quality})
+	writeJSON(w, 200, map[string]any{"schema_version": "oracle-heatmap-v1", "model": "displayed-liquidity-heatmap-v1", "asset": in.Asset, "from": in.From, "to": in.To, "information_cutoff": in.To, "levels": out, "packages": packages, "quality": quality, "source_coverage": liquidityCoverage(in, observations, packages)})
+}
+
+func liquidityCoverage(in analyticsInput, observations []liquidityObservation, packages []string) map[string]any {
+	developing := false
+	for _, item := range packages {
+		if strings.HasPrefix(item, "developing-") {
+			developing = true
+			break
+		}
+	}
+	state := "NO_OBSERVATIONS_IN_RANGE"
+	first, last := time.Time{}, time.Time{}
+	for _, observation := range observations {
+		if first.IsZero() || observation.At.Before(first) {
+			first = observation.At
+		}
+		if observation.At.After(last) {
+			last = observation.At
+		}
+	}
+	if len(observations) > 0 {
+		state = "AVAILABLE"
+		if developing {
+			state = "DEVELOPING_PARTIAL"
+		}
+	} else if developing {
+		state = "DEVELOPING_NO_OBSERVATIONS"
+	}
+	return map[string]any{"state": state, "developing": developing, "requested_from": in.From, "requested_to": in.To, "observed_from": first, "observed_to": last, "observations": len(observations)}
 }
 
 func (s *Server) openInterest(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +235,17 @@ func (s *Server) scanArchiveFiles(r *http.Request, in analyticsInput, rel string
 	for _, date := range dates {
 		m, dir, err := s.find("lighter-" + date)
 		if err != nil {
+			plainRel := strings.TrimSuffix(rel, ".zst")
+			path := filepath.Join(s.root, "date="+date, filepath.FromSlash(plainRel))
+			used, scanErr := scanPlainJSONL(r, path, consume)
+			if scanErr != nil {
+				return packages, qualities, scanErr
+			}
+			if used {
+				packages = append(packages, "developing-"+date)
+				qualities = appendUnique(qualities, string(model.QualityCertified))
+				continue
+			}
 			return packages, qualities, fmt.Errorf("archive for Chicago date %s is unavailable", date)
 		}
 		q, _, err := usableQuality(m, in.Allow)
@@ -255,6 +296,28 @@ func (s *Server) scanArchiveFiles(r *http.Request, in analyticsInput, rel string
 		return packages, qualities, errors.New("requested stream is unavailable in matching archives")
 	}
 	return packages, qualities, nil
+}
+
+func scanPlainJSONL(r *http.Request, path string, consume func([]byte) error) (bool, error) {
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), 32<<20)
+	for scanner.Scan() {
+		if err := r.Context().Err(); err != nil {
+			return true, err
+		}
+		if err := consume(scanner.Bytes()); err != nil {
+			return true, err
+		}
+	}
+	return true, scanner.Err()
 }
 
 func correlateLiquidity(events []liquidityObservation, trades []analyticTrade, window time.Duration) []liquidityEvidence {

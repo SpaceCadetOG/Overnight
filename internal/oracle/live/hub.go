@@ -49,6 +49,24 @@ type BookView struct {
 	Quality        model.Quality `json:"quality"`
 }
 
+// OrderFlowView is a low-latency trade-derived view over the bounded live
+// event buffer. CoverageStart makes partial developing coverage explicit.
+type OrderFlowView struct {
+	SchemaVersion string        `json:"schema_version"`
+	Asset         string        `json:"asset"`
+	From          time.Time     `json:"from"`
+	To            time.Time     `json:"to"`
+	CoverageStart time.Time     `json:"coverage_start,omitempty"`
+	CoverageState string        `json:"coverage_state"`
+	Trades        int           `json:"trades"`
+	BuyVolume     string        `json:"buy_volume"`
+	SellVolume    string        `json:"sell_volume"`
+	Delta         string        `json:"delta"`
+	CVD           string        `json:"cvd"`
+	LagMS         int64         `json:"lag_ms"`
+	Quality       model.Quality `json:"quality"`
+}
+
 func New() *Hub {
 	return &Hub{subscribers: map[*subscription]struct{}{}, books: map[string]book.Snapshot{}, latest: map[string]map[model.Stream]model.Envelope{}, recentLimit: 120000}
 }
@@ -86,6 +104,29 @@ func (h *Hub) Dropped() uint64 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.dropped
+}
+
+// Recent returns a copy of matching events so callers can derive bounded live
+// analytics without holding the hub lock or accessing execution state.
+func (h *Hub) Recent(asset string, streams map[model.Stream]bool, since time.Time) ([]model.Envelope, time.Time) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	asset = strings.ToUpper(asset)
+	oldest := time.Time{}
+	if len(h.recent) > 0 {
+		oldest = h.recent[0].OracleReceivedAt
+	}
+	out := make([]model.Envelope, 0)
+	for _, event := range h.recent {
+		if event.Asset != asset || (!since.IsZero() && event.OracleReceivedAt.Before(since)) {
+			continue
+		}
+		if len(streams) > 0 && !streams[event.Stream] {
+			continue
+		}
+		out = append(out, event)
+	}
+	return out, oldest
 }
 
 func (h *Hub) Publish(event model.Envelope) {
