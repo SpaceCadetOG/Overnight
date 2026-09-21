@@ -80,3 +80,19 @@ func TestTamperedCheckpointIsRejected(t *testing.T) {
 		t.Fatal("tampered checkpoint restored")
 	}
 }
+
+func TestTopLevelsSelectsBestPrices(t *testing.T) {
+	side := map[string]string{"99.5": "1", "101": "2", "98": "3", "100.25": "4", "102": "5"}
+	bids := topLevels(side, true, 3)
+	asks := topLevels(side, false, 3)
+	for index, expected := range []string{"102", "101", "100.25"} {
+		if bids[index].Price != expected {
+			t.Fatalf("bid[%d]=%s want=%s", index, bids[index].Price, expected)
+		}
+	}
+	for index, expected := range []string{"98", "99.5", "100.25"} {
+		if asks[index].Price != expected {
+			t.Fatalf("ask[%d]=%s want=%s", index, asks[index].Price, expected)
+		}
+	}
+}
