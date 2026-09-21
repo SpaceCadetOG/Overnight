@@ -36,7 +36,16 @@ func main() {
 	}); err != nil {
 		fatal(err)
 	}
-	c := collector.New(os.Getenv("LIGHTER_BASE_URL"), os.Getenv("LIGHTER_WS_URL"), events)
+	oracleEvents, err := store.NewBufferedDailyJSONL(*root, location, 100*time.Millisecond, 65536)
+	if err != nil {
+		fatal(err)
+	}
+	defer func() {
+		if err := oracleEvents.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "flush normalized Oracle events:", err)
+		}
+	}()
+	c := collector.NewWithOracleEventStore(os.Getenv("LIGHTER_BASE_URL"), os.Getenv("LIGHTER_WS_URL"), events, oracleEvents)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	server := &http.Server{Addr: "127.0.0.1:" + *port, Handler: c.Handler(), ReadHeaderTimeout: 5 * time.Second}

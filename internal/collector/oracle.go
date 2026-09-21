@@ -15,6 +15,7 @@ import (
 
 type oraclePipeline struct {
 	store          interface{ Append(string, any) error }
+	eventStore     interface{ Append(string, any) error }
 	hub            *live.Hub
 	books          map[string]*book.State
 	sequences      map[string]uint64
@@ -55,7 +56,12 @@ type liquidityObservationBatch struct {
 }
 
 func newOraclePipeline(output interface{ Append(string, any) error }) *oraclePipeline {
-	return &oraclePipeline{store: output, hub: live.New(), books: map[string]*book.State{}, sequences: map[string]uint64{}, lastCheckpoint: map[string]time.Time{}, levels: map[string]map[string]map[string]string{}, pendingChanges: map[string][]liquidityChange{}, changeWindow: map[string]time.Time{}}
+	return newOraclePipelineWithEventStore(output, output)
+
+}
+
+func newOraclePipelineWithEventStore(output, eventOutput interface{ Append(string, any) error }) *oraclePipeline {
+	return &oraclePipeline{store: output, eventStore: eventOutput, hub: live.New(), books: map[string]*book.State{}, sequences: map[string]uint64{}, lastCheckpoint: map[string]time.Time{}, levels: map[string]map[string]map[string]string{}, pendingChanges: map[string][]liquidityChange{}, changeWindow: map[string]time.Time{}}
 }
 
 func (p *oraclePipeline) resetBooks() {
@@ -134,7 +140,7 @@ func (p *oraclePipeline) accept(raw []byte, asset string, received time.Time, co
 			}
 		}
 		p.hub.Publish(events[i])
-		if err := p.store.Append("asset="+asset+"/oracle_events", events[i]); err != nil {
+		if err := p.eventStore.Append("asset="+asset+"/oracle_events", events[i]); err != nil {
 			return i, checkpoints, err
 		}
 	}
