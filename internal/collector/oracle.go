@@ -126,13 +126,17 @@ func (p *oraclePipeline) accept(raw []byte, asset string, received time.Time, co
 				}
 			}
 			now := received.UTC()
-			snapshot, snapshotErr := state.Snapshot(0, now, connectionID)
+			liveSnapshot, snapshotErr := state.Snapshot(25, now, connectionID)
 			if snapshotErr != nil {
 				return i, checkpoints, snapshotErr
 			}
-			p.hub.SetBook(snapshot)
+			p.hub.SetBook(liveSnapshot)
 			if events[i].Stream == model.StreamBookSnapshot || now.Sub(p.lastCheckpoint[asset]) >= time.Minute {
-				if err := p.store.Append("asset="+asset+"/oracle_book_checkpoints", snapshot); err != nil {
+				checkpoint, checkpointErr := state.Snapshot(0, now, connectionID)
+				if checkpointErr != nil {
+					return i, checkpoints, checkpointErr
+				}
+				if err := p.store.Append("asset="+asset+"/oracle_book_checkpoints", checkpoint); err != nil {
 					return i, checkpoints, err
 				}
 				p.lastCheckpoint[asset] = now
