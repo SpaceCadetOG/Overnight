@@ -96,6 +96,54 @@ func TestBookDeltaPublishesAuthoritativeBoundedBookState(t *testing.T) {
 	}
 }
 
+func TestSynchronizedIsEmittedExactlyOncePerConnection(t *testing.T) {
+	hub := New()
+	state := book.New("BTC")
+	if err := state.ApplySnapshot(model.Book{Nonce: 10, Bids: []model.Level{{Price: "99", Size: "2"}}, Asks: []model.Level{{Price: "101", Size: "3"}}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := state.Snapshot(0, time.Now(), "conn-1")
+	hub.SetBook(snapshot)
+	server := httptest.NewServer(hubHandler(hub))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/live?assets=BTC&streams=book_delta", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	synchronized := 0
+	for i := 0; i < 3; i++ {
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), `"type":"synchronized"`) {
+			synchronized++
+		}
+	}
+
+	if err := state.ApplyDelta(model.Book{BeginNonce: 10, Nonce: 11, Bids: []model.Level{{Price: "99", Size: "3"}}}, 2); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ = state.Snapshot(0, time.Now(), "conn-1")
+	hub.SetBook(snapshot)
+	delta, _ := model.New("BTC", model.StreamBookDelta, 2, 11, time.Now(), "conn-1", model.QualityCertified, model.Book{BeginNonce: 10, Nonce: 11, Bids: []model.Level{{Price: "99", Size: "3"}}})
+	hub.Publish(delta)
+	for i := 0; i < 2; i++ {
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), `"type":"synchronized"`) {
+			synchronized++
+		}
+	}
+	if synchronized != 1 {
+		t.Fatalf("synchronized messages=%d want=1", synchronized)
+	}
+}
+
 func hubHandler(hub *Hub) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/live", hub.ServeWS)
