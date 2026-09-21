@@ -16,6 +16,19 @@ import (
 
 type memoryStore struct{ records map[string][]any }
 
+func TestLevelsMatchPublishedDepth(t *testing.T) {
+	legacy := map[string]string{"100": "2", "99": "3", "98": "4"}
+	if !levelsMatch(legacy, []model.Level{{Price: "100", Size: "2"}, {Price: "99", Size: "3"}}) {
+		t.Fatal("expected published depth to match authoritative book")
+	}
+	if levelsMatch(legacy, []model.Level{{Price: "100", Size: "9"}}) {
+		t.Fatal("expected size mismatch to fail parity")
+	}
+	if levelsMatch(legacy, []model.Level{{Price: "101", Size: "2"}}) {
+		t.Fatal("expected missing price to fail parity")
+	}
+}
+
 func (s *memoryStore) Append(stream string, value any) error {
 	if s.records == nil {
 		s.records = map[string][]any{}

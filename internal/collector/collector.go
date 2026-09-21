@@ -402,7 +402,19 @@ func (c *Collector) oracleParity(channel, asset string) bool {
 	legacyBid, legacyAsk := bestPrices(legacy)
 	shadowBid, bidErr := strconv.ParseFloat(shadow.Bids[0].Price, 64)
 	shadowAsk, askErr := strconv.ParseFloat(shadow.Asks[0].Price, 64)
-	return bidErr == nil && askErr == nil && legacyBid == shadowBid && legacyAsk == shadowAsk && len(legacy.Bids) == len(shadow.Bids) && len(legacy.Asks) == len(shadow.Asks)
+	return bidErr == nil && askErr == nil && legacyBid == shadowBid && legacyAsk == shadowAsk && levelsMatch(legacy.Bids, shadow.Bids) && levelsMatch(legacy.Asks, shadow.Asks)
+}
+
+func levelsMatch(legacy map[string]string, published []model.Level) bool {
+	if len(published) == 0 || len(published) > len(legacy) {
+		return false
+	}
+	for _, level := range published {
+		if legacy[level.Price] != level.Size {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Collector) assetForChannel(channel string) string {
