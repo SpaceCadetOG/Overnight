@@ -60,8 +60,8 @@ func newOraclePipeline(output interface{ Append(string, any) error }) *oraclePip
 
 }
 
-func newOraclePipelineWithEventStore(output, eventOutput interface{ Append(string, any) error }) *oraclePipeline {
-	return &oraclePipeline{store: output, eventStore: eventOutput, hub: live.New(), books: map[string]*book.State{}, sequences: map[string]uint64{}, lastCheckpoint: map[string]time.Time{}, levels: map[string]map[string]map[string]string{}, pendingChanges: map[string][]liquidityChange{}, changeWindow: map[string]time.Time{}}
+func newOraclePipelineWithEventStore(_ interface{ Append(string, any) error }, eventOutput interface{ Append(string, any) error }) *oraclePipeline {
+	return &oraclePipeline{store: eventOutput, eventStore: eventOutput, hub: live.New(), books: map[string]*book.State{}, sequences: map[string]uint64{}, lastCheckpoint: map[string]time.Time{}, levels: map[string]map[string]map[string]string{}, pendingChanges: map[string][]liquidityChange{}, changeWindow: map[string]time.Time{}}
 }
 
 func (p *oraclePipeline) resetBooks() {
