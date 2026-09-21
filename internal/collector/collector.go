@@ -114,6 +114,13 @@ type orderBook struct {
 }
 
 func New(baseURL, wsURL string, output interface{ Append(string, any) error }) *Collector {
+	return NewWithOracleEventStore(baseURL, wsURL, output, output)
+}
+
+// NewWithOracleEventStore keeps high-volume normalized event persistence off
+// the WebSocket processing path while retaining the durable primary store for
+// checkpoints, observations, and existing recorder streams.
+func NewWithOracleEventStore(baseURL, wsURL string, output, oracleEvents interface{ Append(string, any) error }) *Collector {
 	if strings.TrimSpace(wsURL) == "" {
 		// Lighter exposes the same public market-data feed through a read-only
 		// route for IPs in restricted regions. The collector never submits orders.
@@ -125,7 +132,7 @@ func New(baseURL, wsURL string, output interface{ Append(string, any) error }) *
 		}
 		wsURL += separator + "readonly=true"
 	}
-	return &Collector{BaseURL: baseURL, WSURL: wsURL, Store: output, Status: &Status{}, lastNonce: map[string]int64{}, books: map[string]*orderBook{}, marketIDs: map[string]string{}, lastCheckpoint: map[string]time.Time{}, flow: newLiquidationCorrelator(), oracle: newOraclePipeline(output), oracleParityOK: map[string]bool{}, instruments: map[string]oracleInstrument{}}
+	return &Collector{BaseURL: baseURL, WSURL: wsURL, Store: output, Status: &Status{}, lastNonce: map[string]int64{}, books: map[string]*orderBook{}, marketIDs: map[string]string{}, lastCheckpoint: map[string]time.Time{}, flow: newLiquidationCorrelator(), oracle: newOraclePipelineWithEventStore(output, oracleEvents), oracleParityOK: map[string]bool{}, instruments: map[string]oracleInstrument{}}
 }
 
 func (c *Collector) Run(ctx context.Context) error {
@@ -614,7 +621,11 @@ func (c *Collector) serveLiveOrderFlow(w http.ResponseWriter, r *http.Request) {
 }
 
 func decimalFloat(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
+	formatted := strings.TrimRight(strings.TrimRight(strconv.FormatFloat(value, 'f', 8, 64), "0"), ".")
+	if formatted == "-0" || formatted == "" {
+		return "0"
+	}
+	return formatted
 }
 
 func (c *Collector) serveInstruments(w http.ResponseWriter, _ *http.Request) {
