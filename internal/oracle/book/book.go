@@ -77,17 +77,18 @@ func (s *State) ApplyDelta(value model.Book, oracleSequence uint64) error {
 	if value.BeginNonce != s.nonce || value.Nonce <= s.nonce || oracleSequence != s.sequence+1 {
 		return s.invalidateLocked(fmt.Sprintf("sequence gap: nonce=%d begin=%d end=%d oracle=%d next=%d", s.nonce, value.BeginNonce, value.Nonce, oracleSequence, s.sequence+1))
 	}
-	bids, asks := clone(s.bids), clone(s.asks)
-	if err := apply(bids, value.Bids); err != nil {
+	if err := validate(value.Bids); err != nil {
 		return s.invalidateLocked("invalid delta bids: " + err.Error())
 	}
-	if err := apply(asks, value.Asks); err != nil {
+	if err := validate(value.Asks); err != nil {
 		return s.invalidateLocked("invalid delta asks: " + err.Error())
 	}
-	if crossed(bids, asks) {
+	applyValidated(s.bids, value.Bids)
+	applyValidated(s.asks, value.Asks)
+	if crossed(s.bids, s.asks) {
 		return s.invalidateLocked("crossed delta")
 	}
-	s.bids, s.asks, s.nonce, s.sequence = bids, asks, value.Nonce, oracleSequence
+	s.nonce, s.sequence = value.Nonce, oracleSequence
 	return nil
 }
 
@@ -137,6 +138,14 @@ func (s *State) invalidateLocked(reason string) error {
 }
 
 func apply(side map[string]string, levels []model.Level) error {
+	if err := validate(levels); err != nil {
+		return err
+	}
+	applyValidated(side, levels)
+	return nil
+}
+
+func validate(levels []model.Level) error {
 	for _, level := range levels {
 		price, size := new(big.Rat), new(big.Rat)
 		if _, ok := price.SetString(level.Price); !ok || price.Sign() <= 0 {
@@ -145,13 +154,20 @@ func apply(side map[string]string, levels []model.Level) error {
 		if _, ok := size.SetString(level.Size); !ok || size.Sign() < 0 {
 			return fmt.Errorf("invalid size %q", level.Size)
 		}
+	}
+	return nil
+}
+
+func applyValidated(side map[string]string, levels []model.Level) {
+	for _, level := range levels {
+		size := new(big.Rat)
+		size.SetString(level.Size)
 		if size.Sign() == 0 {
 			delete(side, level.Price)
 		} else {
 			side[level.Price] = level.Size
 		}
 	}
-	return nil
 }
 
 func crossed(bids, asks map[string]string) bool {
@@ -186,14 +202,6 @@ func sorted(side map[string]string, descending bool, depth int) []model.Level {
 	out := make([]model.Level, 0, len(prices))
 	for _, price := range prices {
 		out = append(out, model.Level{Price: price, Size: side[price]})
-	}
-	return out
-}
-
-func clone(source map[string]string) map[string]string {
-	out := make(map[string]string, len(source))
-	for key, value := range source {
-		out[key] = value
 	}
 	return out
 }
