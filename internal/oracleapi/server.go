@@ -103,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/quality/windows", s.quality)
 	mux.HandleFunc("GET /v1/downloads/{package}/{path...}", s.download)
 	mux.HandleFunc("GET /v1/trades", s.trades)
+	mux.HandleFunc("GET /v1/tape", s.tape)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("GET /v1/candles", s.candles)
 	mux.HandleFunc("GET /v1/profiles", s.profiles)
