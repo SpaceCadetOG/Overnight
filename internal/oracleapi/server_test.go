@@ -356,6 +356,61 @@ func TestTradeDerivedAnalytics(t *testing.T) {
 	}
 }
 
+// TestAllowUncertifiedIncludesExcludedIntervalTrades covers a certified
+// package whose certificate window does not cover the trades' receipt time
+// (the normal case for a reconnect-cycling modern connection: certification
+// is per session, and the gap between sessions excludes real trades, not
+// just quiet minutes). By default those trades must stay excluded. With
+// allow_uncertified=true a research client should see the real trades
+// instead of a gap - never a fabricated flat candle standing in for them.
+func TestAllowUncertifiedIncludesExcludedIntervalTrades(t *testing.T) {
+	server := fixture(t)
+	dir := filepath.Join(server.root, "date=2026-09-08")
+	// The fixture's trades are received at 12:01:00Z; certify only up to
+	// 12:00:30Z so they fall in an uncertified gap.
+	narrow := []byte(`{"classification":"CERTIFIED_WITH_EXCLUDED_INTERVALS","assets":[{"symbol":"BTC","windows":[{"started_at":"2026-09-08T12:00:00Z","ended_at":"2026-09-08T12:00:30Z","certified":true}]}]}`)
+	if err := os.WriteFile(filepath.Join(dir, "RECORDER_CERTIFICATE.json"), narrow, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	h := server.Handler()
+	base := "/v1/candles?asset=BTC&from=2026-09-08T12:00:00Z&to=2026-09-08T13:00:00Z&interval=1m"
+
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, base, nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("default request: status=%d body=%s", r.Code, r.Body.String())
+	}
+	var byDefault struct {
+		Candles  []json.RawMessage `json:"candles"`
+		Excluded int               `json:"excluded_events"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &byDefault); err != nil {
+		t.Fatal(err)
+	}
+	if len(byDefault.Candles) != 0 || byDefault.Excluded != 2 {
+		t.Fatalf("default request should exclude the uncertified trades, not fabricate or include them: candles=%d excluded=%d", len(byDefault.Candles), byDefault.Excluded)
+	}
+
+	r = httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, base+"&allow_uncertified=true", nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("exploratory request: status=%d body=%s", r.Code, r.Body.String())
+	}
+	var exploratory struct {
+		Candles  []json.RawMessage `json:"candles"`
+		Excluded int               `json:"excluded_events"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &exploratory); err != nil {
+		t.Fatal(err)
+	}
+	if len(exploratory.Candles) != 1 || exploratory.Excluded != 0 {
+		t.Fatalf("allow_uncertified=true should surface the real trades instead of a gap: candles=%d excluded=%d body=%s", len(exploratory.Candles), exploratory.Excluded, r.Body.String())
+	}
+	if !strings.Contains(r.Body.String(), `"trades":2`) {
+		t.Fatalf("expected both real trades in the candle, not a synthesized flat one: %s", r.Body.String())
+	}
+}
+
 func TestStreamingProfileAccumulatorMatchesExactProfile(t *testing.T) {
 	trades := []analyticTrade{
 		{At: time.Unix(1, 0), Price: 100, Size: 2, Notional: 200, Buy: true},

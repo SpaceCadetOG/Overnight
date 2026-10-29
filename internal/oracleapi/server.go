@@ -287,7 +287,7 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, errors.New("quality certificate unavailable"))
 			return
 		}
-		windows, coverageErr := s.legacyObservedWindows(manifest, dir)
+		windows, coverageErr := s.observedConnectionWindows(manifest, dir)
 		if coverageErr != nil {
 			writeError(w, http.StatusUnprocessableEntity, coverageErr)
 			return
@@ -316,7 +316,40 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, errors.New("quality certificate is invalid"))
 		return
 	}
+	// The certificate's own windows are per-connection and only cover
+	// certified sessions, so a reconnect between two of them otherwise reads
+	// as an unexplained gap even though the recorder never actually lost its
+	// connection. Attach the recorder's own observed connectivity alongside
+	// the certified windows so a consumer can tell "disconnected" apart from
+	// "connected, this specific session just isn't certified" — best effort,
+	// and never replaces or weakens the certificate itself.
+	if windows, err := s.observedConnectionWindows(manifest, dir); err == nil {
+		attachObservedConnectionWindows(certificate, windows)
+	}
 	writeJSON(w, http.StatusOK, certificate)
+}
+
+func attachObservedConnectionWindows(certificate any, windows []observedWindow) {
+	root, ok := certificate.(map[string]any)
+	if !ok {
+		return
+	}
+	assets, ok := root["assets"].([]any)
+	if !ok {
+		return
+	}
+	extra := make([]any, len(windows))
+	for i, w := range windows {
+		extra[i] = w
+	}
+	for _, entry := range assets {
+		asset, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		existing, _ := asset["windows"].([]any)
+		asset["windows"] = append(existing, extra...)
+	}
 }
 
 func (s *Server) download(w http.ResponseWriter, r *http.Request) {

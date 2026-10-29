@@ -108,7 +108,7 @@ func (s *Server) walkAnalyticTrades(r *http.Request, in analyticsInput, consume 
 				if at.Before(in.From) || !at.Before(in.To) {
 					continue
 				}
-				if len(windows) > 0 && !inCertifiedWindow(event.OracleReceivedAt, windows) {
+				if !in.Allow && len(windows) > 0 && !inCertifiedWindow(event.OracleReceivedAt, windows) {
 					result.Excluded++
 					continue
 				}

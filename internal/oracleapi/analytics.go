@@ -301,7 +301,19 @@ func parseInterval(raw string) (time.Duration, error) {
 	return value, nil
 }
 
+// buildCandles requires trades in strictly ascending exchange-timestamp
+// order to assign open/close, high/low and CVD correctly. Archive scans are
+// not guaranteed to deliver trades in that order near reconnects or legacy
+// catch-up batches, so this sorts a copy first; otherwise the same minute's
+// trades can land in two non-adjacent runs and silently produce two
+// conflicting candles for one start time instead of one correct candle.
 func buildCandles(trades []analyticTrade, interval time.Duration) []candle {
+	if !sort.SliceIsSorted(trades, func(i, j int) bool { return trades[i].At.Before(trades[j].At) }) {
+		sorted := make([]analyticTrade, len(trades))
+		copy(sorted, trades)
+		sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].At.Before(sorted[j].At) })
+		trades = sorted
+	}
 	out := []candle{}
 	var current *candle
 	var cvd float64
