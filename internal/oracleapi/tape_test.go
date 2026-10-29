@@ -145,6 +145,85 @@ func TestLegacyQualityReportsObservedConnectionWindowsWithoutCertification(t *te
 	}
 }
 
+// TestModernQualityAttachesObservedConnectionWindowsAlongsideCertificate
+// covers a schema-4 package that already has a RECORDER_CERTIFICATE.json:
+// its certified windows are per-connection, so a reconnect between two
+// certified sessions otherwise looks identical to the recorder actually
+// losing its connection. The response must keep the certificate's own
+// certified window untouched and add the observed-but-uncertified
+// reconnect gap alongside it, not replace or hide either one.
+func TestModernQualityAttachesObservedConnectionWindowsAlongsideCertificate(t *testing.T) {
+	server := fixture(t)
+	dir := filepath.Join(server.root, "date=2026-09-08")
+	manifestPath := filepath.Join(dir, "MANIFEST.json")
+	var manifest Manifest
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.FirstEvent = time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	manifest.LastEvent = time.Date(2026, 9, 8, 13, 5, 0, 0, time.UTC)
+	events := zstdBody(t, `{"channel":"connected","event":{"type":"connected"},"received_at":"2026-09-08T13:01:00Z"}`+"\n")
+	reconnects := zstdBody(t, `{"recorded_at":"2026-09-08T13:00:00Z","error":"session cycled"}`+"\n")
+	for _, file := range []struct {
+		name string
+		body []byte
+	}{
+		{"collector_events.jsonl.zst", events},
+		{"collector_reconnects.jsonl.zst", reconnects},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, file.name), file.body, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		manifest.Files = append(manifest.Files, File{Path: file.name, Compressed: int64(len(file.body)), Records: 1, SHA256: digest(file.body)})
+	}
+	updated, _ := json.Marshal(manifest)
+	if err := os.WriteFile(manifestPath, updated, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	r := httptest.NewRecorder()
+	server.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/v1/quality/windows?package_id="+manifest.PackageID, nil))
+	if r.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+	var response struct {
+		Classification string `json:"classification"`
+		Assets         []struct {
+			Symbol  string           `json:"symbol"`
+			Windows []observedWindow `json:"windows"`
+		} `json:"assets"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Classification != "CERTIFIED" {
+		t.Fatalf("certificate's own classification must survive untouched: %+v", response)
+	}
+	if len(response.Assets) == 0 || response.Assets[0].Symbol != "BTC" {
+		t.Fatalf("unexpected assets: %+v", response.Assets)
+	}
+	windows := response.Assets[0].Windows
+	var sawCertified, sawConnectedUncertified bool
+	for _, w := range windows {
+		if w.Certified {
+			sawCertified = true
+		}
+		if w.Connected && !w.Certified {
+			sawConnectedUncertified = true
+		}
+	}
+	if !sawCertified {
+		t.Fatalf("lost the certificate's own certified window: %+v", windows)
+	}
+	if !sawConnectedUncertified {
+		t.Fatalf("missing observed-but-uncertified reconnect-gap window: %+v", windows)
+	}
+}
+
 func TestTapeUsesHourlyIndexAndPreservesRecordedOrder(t *testing.T) {
 	server := fixture(t)
 	if err := BuildIndexes(server.root, server.indexRoot, "lighter-2026-09-08"); err != nil {

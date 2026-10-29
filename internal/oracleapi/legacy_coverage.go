@@ -25,14 +25,16 @@ type connectionMark struct {
 	Connected bool
 }
 
-// legacyObservedWindows reconstructs recorder-level connectivity only. It does
-// not certify the market stream or upgrade the package quality. Consumers may
-// use a fully enclosed minute as a zero-trade observation only in explicitly
-// labeled exploratory research.
-func (s *Server) legacyObservedWindows(manifest Manifest, dir string) ([]observedWindow, error) {
-	if manifest.SchemaVersion >= 4 {
-		return nil, fmt.Errorf("legacy coverage is only available for schema 2/3 packages")
-	}
+// observedConnectionWindows reconstructs recorder-level connectivity only,
+// from the collector's own connect/reconnect logs. It does not certify the
+// market stream or upgrade the package quality, and it applies to every
+// schema version: schema 4 packages reconnect too (the WS session cycles
+// every few minutes), and their certification windows are per-connection,
+// so the brief gaps between them would otherwise show up as unexplained
+// missing minutes even though the recorder stayed connected throughout.
+// Consumers may use a fully enclosed minute as a zero-trade observation
+// only in explicitly labeled exploratory research.
+func (s *Server) observedConnectionWindows(manifest Manifest, dir string) ([]observedWindow, error) {
 	marks := []connectionMark{}
 	if !manifest.FirstEvent.IsZero() {
 		marks = append(marks, connectionMark{At: manifest.FirstEvent.UTC(), Connected: true})
