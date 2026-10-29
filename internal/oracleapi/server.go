@@ -276,14 +276,39 @@ func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("package_id is required"))
 		return
 	}
-	_, dir, err := s.find(packageID)
+	manifest, dir, err := s.find(packageID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "RECORDER_CERTIFICATE.json"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, errors.New("quality certificate unavailable"))
+		if manifest.SchemaVersion >= 4 {
+			writeError(w, http.StatusNotFound, errors.New("quality certificate unavailable"))
+			return
+		}
+		windows, coverageErr := s.legacyObservedWindows(manifest, dir)
+		if coverageErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, coverageErr)
+			return
+		}
+		type assetCoverage struct {
+			Symbol  string           `json:"symbol"`
+			Windows []observedWindow `json:"windows"`
+		}
+		assets := make([]assetCoverage, 0, len(manifest.Assets))
+		for _, asset := range manifest.Assets {
+			assets = append(assets, assetCoverage{Symbol: asset, Windows: windows})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"classification": "LEGACY_UNCERTIFIED",
+			"coverage_basis": "collector_connection_logs",
+			"limitations": []string{
+				"recorder connectivity is observed but the market stream is not certified",
+				"connected quiet minutes may be zero-filled only for explicitly labeled exploratory research",
+			},
+			"assets": assets,
+		})
 		return
 	}
 	var certificate any
