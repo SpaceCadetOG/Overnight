@@ -161,7 +161,11 @@ func (s *Server) walkIndexedAnalyticTrades(r *http.Request, in analyticsInput, c
 				if json.Unmarshal(scanner.Bytes(), &row) != nil {
 					continue
 				}
-				events, err := oraclelighter.Normalize(row.Event, oraclelighter.Context{Asset: in.Asset, ReceivedAt: row.ReceivedAt, ConnectionID: row.ConnectionID, FirstSequence: sequence, DefaultQuality: pkg.quality})
+				connectionID := row.ConnectionID
+				if connectionID == "" && pkg.manifest.SchemaVersion < 4 {
+					connectionID = legacyConnectionID(pkg.manifest.PackageID, in.Asset)
+				}
+				events, err := oraclelighter.Normalize(row.Event, oraclelighter.Context{Asset: in.Asset, ReceivedAt: row.ReceivedAt, ConnectionID: connectionID, FirstSequence: sequence, DefaultQuality: pkg.quality})
 				if err != nil {
 					continue
 				}

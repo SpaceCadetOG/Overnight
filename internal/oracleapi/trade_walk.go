@@ -87,7 +87,15 @@ func (s *Server) walkAnalyticTrades(r *http.Request, in analyticsInput, consume 
 				file.Close()
 				return result, 500, err
 			}
-			events, err := oraclelighter.Normalize(row.Event, oraclelighter.Context{Asset: in.Asset, ReceivedAt: row.ReceivedAt, ConnectionID: row.ConnectionID, FirstSequence: sequence, DefaultQuality: quality})
+			connectionID := row.ConnectionID
+			if connectionID == "" && manifest.SchemaVersion < 4 {
+				// Schema 2/3 archives predate per-row connection IDs. They remain
+				// explicitly uncertified, but still need a stable identity so the
+				// normalized decoder can expose their recorded trades for opt-in
+				// historical research. Never apply this fallback to schema 4 data.
+				connectionID = legacyConnectionID(manifest.PackageID, in.Asset)
+			}
+			events, err := oraclelighter.Normalize(row.Event, oraclelighter.Context{Asset: in.Asset, ReceivedAt: row.ReceivedAt, ConnectionID: connectionID, FirstSequence: sequence, DefaultQuality: quality})
 			if err != nil {
 				continue
 			}
@@ -129,6 +137,10 @@ func (s *Server) walkAnalyticTrades(r *http.Request, in analyticsInput, consume 
 		return result, 404, fmt.Errorf("trade stream is unavailable in matching archives")
 	}
 	return result, 200, nil
+}
+
+func legacyConnectionID(packageID, asset string) string {
+	return "legacy:" + packageID + ":" + strings.ToUpper(asset)
 }
 
 func (s *Server) walkDevelopingTrades(r *http.Request, date string, in analyticsInput, consume func(analyticTrade), result *queryResponse) (bool, error) {
